@@ -75,21 +75,30 @@ export AJNA_TEST_POOL_ADDRESS="0x97dbbdba28df6d629bc17e0349bcb73d541ed041"
 export AJNA_TEST_BUCKET_INDEX=3232
 export AJNA_TEST_FUND_AMOUNT_RAW=100000000
 export AJNA_TEST_LEND_AMOUNT_WAD=100000000000000000000
+export AJNA_TEST_BORROW_LIMIT_INDEX=5000
+export AJNA_TEST_COLLATERAL_FUND_AMOUNT_RAW=50000000000000000000
+export AJNA_TEST_COLLATERAL_AMOUNT_WAD=50000000000000000000
+export AJNA_TEST_BORROW_AMOUNT_WAD=1000000000000000000
 export AJNA_TEST_TTL_SECONDS=31536000
 export AJNA_TEST_QUOTE_WHALE="0xee7ae85f2fe2239e27d9c1e23fffe168d63b4055"
+export AJNA_TEST_COLLATERAL_WHALE="0x78f691c07e58fa6808e77915027ea1ca883d721d"
 npm run test:fork
 ```
 
-This path starts a local Anvil fork, runs one real `prepare-lend -> execute-prepared`
-flow, then asserts that replaying the same prepared payload fails once the signer
-nonce has moved. Set `AJNA_BASE_FORK_BLOCK_NUMBER` in CI if you want deterministic
-state across runs. `AJNA_TEST_TTL_SECONDS` exists so old pinned blocks do not fail
-only because the prepared payload expired relative to wall-clock time. Foundry is
-only needed for this optional test path. `AJNA_TEST_FUND_AMOUNT_RAW` is the quote
-token transfer amount in native token units, while `AJNA_TEST_LEND_AMOUNT_WAD` is
-the Ajna lend amount in WAD precision. For backward compatibility, the fork runner
-still accepts the older `AJNA_TEST_LEND_AMOUNT` name as a fallback for the WAD
-value.
+This path starts a local Anvil fork, runs real `prepare-* -> execute-prepared`
+flows for both lend and borrow, then asserts that replaying the same prepared
+payload fails once the signer nonce has moved. Set `AJNA_BASE_FORK_BLOCK_NUMBER`
+in CI if you want deterministic state across runs. `AJNA_TEST_TTL_SECONDS` exists
+so old pinned blocks do not fail only because the prepared payload expired relative
+to wall-clock time. Foundry is only needed for this optional test path.
+
+`AJNA_TEST_FUND_AMOUNT_RAW` is the quote-token transfer amount in native token
+units, while `AJNA_TEST_LEND_AMOUNT_WAD` is the Ajna lend amount in WAD precision.
+For backward compatibility, the fork runner still accepts the older
+`AJNA_TEST_LEND_AMOUNT` name as a fallback for the WAD value. The borrow fixture
+uses the same pinned pool and block, with `AJNA_TEST_COLLATERAL_FUND_AMOUNT_RAW`
+for the AERO transfer, `AJNA_TEST_COLLATERAL_AMOUNT_WAD` for pledged collateral,
+and `AJNA_TEST_BORROW_AMOUNT_WAD` for the borrowed USDC amount.
 
 ## Runtime model
 
