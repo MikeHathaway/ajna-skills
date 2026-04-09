@@ -3,8 +3,10 @@ import type { BigNumber } from "ethers";
 export type AjnaNetwork = "base" | "ethereum";
 export type AjnaSkillMode = "inspect" | "prepare" | "execute";
 export type PositionType = "borrower" | "lender";
+export type PoolInspectionDetailLevel = "basic" | "full";
 export type ActionKind =
   | "inspect-pool"
+  | "inspect-bucket"
   | "inspect-position"
   | "prepare-lend"
   | "prepare-borrow"
@@ -26,7 +28,13 @@ export interface PoolSelector {
   quoteAddress?: string;
 }
 
-export interface InspectPoolInput extends PoolSelector {}
+export interface InspectPoolInput extends PoolSelector {
+  detailLevel?: PoolInspectionDetailLevel;
+}
+
+export interface InspectBucketInput extends PoolSelector {
+  bucketIndex: number;
+}
 
 export interface InspectPositionInput extends PoolSelector {
   owner: string;
@@ -154,6 +162,7 @@ export interface ErrorEnvelope {
 
 export interface PoolInspectionResult {
   network: AjnaNetwork;
+  detailLevel: PoolInspectionDetailLevel;
   poolAddress: string;
   collateralAddress: string;
   collateralSymbol: string | null;
@@ -179,6 +188,44 @@ export interface PoolInspectionResult {
     claimableReservesRemaining: string;
     borrowFeeRate: string;
     depositFeeRate: string;
+  };
+  full?: {
+    config: {
+      poolType: number;
+      quoteTokenScale: string;
+      collateralScale: string;
+    };
+    rates: {
+      borrowRate: string;
+      lenderInterestMargin: string;
+      interestRateLastUpdated: string;
+    };
+    debt: {
+      debt: string;
+      poolDebtInAuction: string;
+      pendingInflator: string;
+      pendingInterestFactor: string;
+    };
+    totals: {
+      pledgedCollateral: string;
+      reserveAuctionPrice: string;
+      reserveAuctionTimeRemaining: string;
+    };
+  };
+}
+
+export interface BucketInspectionResult {
+  network: AjnaNetwork;
+  poolAddress: string;
+  bucketIndex: number;
+  bucket: {
+    price: string;
+    quoteTokens: string;
+    collateral: string;
+    bucketLP: string;
+    scale: string;
+    exchangeRate: string;
+    collateralDust: string;
   };
 }
 

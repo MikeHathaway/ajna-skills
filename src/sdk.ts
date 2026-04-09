@@ -19,6 +19,8 @@ import { AjnaSkillError, invariant } from "./errors.js";
 import { finalizePreparedAction } from "./prepared.js";
 import type {
   AllowanceCheck,
+  BucketInspectionResult,
+  InspectBucketInput,
   InspectPoolInput,
   InspectPositionInput,
   PoolInspectionResult,
@@ -47,6 +49,7 @@ export class AjnaAdapter {
   constructor(private readonly runtime: RuntimeConfig) {}
 
   async inspectPool(input: InspectPoolInput): Promise<PoolInspectionResult> {
+    const detailLevel = input.detailLevel ?? "basic";
     const network = this.network(input.network);
     const provider = await this.provider(network);
     const poolAddress = await this.resolvePoolAddress(input, network, provider);
@@ -65,8 +68,9 @@ export class AjnaAdapter {
         poolInfoUtils.depositFeeRate(poolAddress)
       ]);
 
-    return {
+    const baseResult: PoolInspectionResult = {
       network: input.network,
+      detailLevel,
       poolAddress,
       collateralAddress,
       collateralSymbol: await this.readSymbol(collateralAddress, provider),
@@ -92,6 +96,75 @@ export class AjnaAdapter {
         claimableReservesRemaining: reserves.claimableReservesRemaining_.toString(),
         borrowFeeRate: borrowFeeRate.toString(),
         depositFeeRate: depositFeeRate.toString()
+      }
+    };
+
+    if (detailLevel !== "full") {
+      return baseResult;
+    }
+
+    const [debtInfo, interestRateInfo, pledgedCollateral, poolType, quoteTokenScale, collateralScale, lenderMargin] =
+      await Promise.all([
+        pool.debtInfo(),
+        pool.interestRateInfo(),
+        pool.pledgedCollateral(),
+        pool.poolType(),
+        pool.quoteTokenScale(),
+        pool.collateralScale(),
+        poolInfoUtils.lenderInterestMargin(poolAddress)
+      ]);
+
+    return {
+      ...baseResult,
+      full: {
+        config: {
+          poolType,
+          quoteTokenScale: quoteTokenScale.toString(),
+          collateralScale: collateralScale.toString()
+        },
+        rates: {
+          borrowRate: interestRateInfo[0].toString(),
+          lenderInterestMargin: lenderMargin.toString(),
+          interestRateLastUpdated: new Date(interestRateInfo[1].toNumber() * 1000).toISOString()
+        },
+        debt: {
+          debt: debtInfo[0].toString(),
+          poolDebtInAuction: debtInfo[2].toString(),
+          pendingInflator: loans.pendingInflator_.toString(),
+          pendingInterestFactor: loans.pendingInterestFactor_.toString()
+        },
+        totals: {
+          pledgedCollateral: pledgedCollateral.toString(),
+          reserveAuctionPrice: reserves.auctionPrice_.toString(),
+          reserveAuctionTimeRemaining: reserves.timeRemaining_.toString()
+        }
+      }
+    };
+  }
+
+  async inspectBucket(input: InspectBucketInput): Promise<BucketInspectionResult> {
+    const network = this.network(input.network);
+    const provider = await this.provider(network);
+    const poolAddress = await this.resolvePoolAddress(input, network, provider);
+    const pool = ERC20Pool__factory.connect(poolAddress, provider);
+    const poolInfoUtils = PoolInfoUtils__factory.connect(network.poolInfoUtils, provider);
+    const [bucketInfo, collateralDust] = await Promise.all([
+      poolInfoUtils.bucketInfo(poolAddress, input.bucketIndex),
+      pool.bucketCollateralDust(input.bucketIndex)
+    ]);
+
+    return {
+      network: input.network,
+      poolAddress,
+      bucketIndex: input.bucketIndex,
+      bucket: {
+        price: bucketInfo.price_.toString(),
+        quoteTokens: bucketInfo.quoteTokens_.toString(),
+        collateral: bucketInfo.collateral_.toString(),
+        bucketLP: bucketInfo.bucketLP_.toString(),
+        scale: bucketInfo.scale_.toString(),
+        exchangeRate: bucketInfo.exchangeRate_.toString(),
+        collateralDust: collateralDust.toString()
       }
     };
   }

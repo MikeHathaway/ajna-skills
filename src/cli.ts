@@ -4,6 +4,7 @@ import { errorEnvelope } from "./errors.js";
 import { parseJsonArgument } from "./json.js";
 import {
   runExecutePrepared,
+  runInspectBucket,
   runInspectPool,
   runInspectPosition,
   runPrepareApproveErc20,
@@ -14,6 +15,7 @@ import {
 } from "./actions.js";
 import type {
   ExecutePreparedInput,
+  InspectBucketInput,
   InspectPoolInput,
   InspectPositionInput,
   PrepareApproveErc20Input,
@@ -31,6 +33,8 @@ async function main() {
   switch (action) {
     case "inspect-pool":
       return printSuccess(await runInspectPool(parseJsonArgument<InspectPoolInput>(payload)));
+    case "inspect-bucket":
+      return printSuccess(await runInspectBucket(parseJsonArgument<InspectBucketInput>(payload)));
     case "inspect-position":
       return printSuccess(await runInspectPosition(parseJsonArgument<InspectPositionInput>(payload)));
     case "prepare-lend":
@@ -49,7 +53,7 @@ async function main() {
       return printSuccess(await runExecutePrepared(parseJsonArgument<ExecutePreparedInput>(payload)));
     default:
       throw new Error(
-        "Unknown action. Expected one of inspect-pool, inspect-position, prepare-lend, prepare-borrow, prepare-approve-erc20, prepare-approve-erc721, prepare-unsupported-ajna-action, execute-prepared"
+        "Unknown action. Expected one of inspect-pool, inspect-bucket, inspect-position, prepare-lend, prepare-borrow, prepare-approve-erc20, prepare-approve-erc721, prepare-unsupported-ajna-action, execute-prepared"
       );
   }
 }

@@ -6,8 +6,10 @@ import { AjnaSkillError, invariant } from "./errors.js";
 import { validatePreparedAction } from "./prepared.js";
 import { AjnaAdapter, assertProviderMatchesNetwork } from "./sdk.js";
 import type {
+  BucketInspectionResult,
   ExecutePreparedInput,
   ExecutePreparedResult,
+  InspectBucketInput,
   InspectPoolInput,
   InspectPositionInput,
   PrepareApproveErc20Input,
@@ -21,6 +23,12 @@ export async function runInspectPool(input: InspectPoolInput) {
   const runtime = loadRuntimeConfig();
   const adapter = new AjnaAdapter(runtime);
   return adapter.inspectPool(input);
+}
+
+export async function runInspectBucket(input: InspectBucketInput): Promise<BucketInspectionResult> {
+  const runtime = loadRuntimeConfig();
+  const adapter = new AjnaAdapter(runtime);
+  return adapter.inspectBucket(input);
 }
 
 export async function runInspectPosition(input: InspectPositionInput) {

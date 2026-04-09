@@ -22,6 +22,7 @@ Pre-v1. This repo is being built to match the approved design and eng review in
 ## Planned v1 commands
 
 - `inspect-pool`
+- `inspect-bucket`
 - `inspect-position`
 - `prepare-lend`
 - `prepare-borrow`
@@ -99,10 +100,11 @@ npm run test:fork
 ```
 
 This path starts a local Anvil fork, runs real `prepare-* -> execute-prepared`
-flows for lend, borrow, standalone ERC20 approval, and standalone ERC721 approval,
-then asserts that replaying the same prepared payload fails once the signer nonce
-has moved. Set `AJNA_BASE_FORK_BLOCK_NUMBER` in CI if you want deterministic state
-across runs. `AJNA_TEST_TTL_SECONDS` exists so old pinned blocks do not fail only
+flows for lend, borrow, standalone ERC20 approval, standalone ERC721 approval,
+and the unsupported `erc20-pool.updateInterest()` escape hatch, then asserts
+that replaying the same prepared payload fails once the signer nonce has moved.
+Set `AJNA_BASE_FORK_BLOCK_NUMBER` in CI if you want deterministic state across
+runs. `AJNA_TEST_TTL_SECONDS` exists so old pinned blocks do not fail only
 because the prepared payload expired relative to wall-clock time. Foundry is only
 needed for this optional test path.
 
@@ -155,6 +157,16 @@ npx skills add <owner>/<repo>
 }
 ```
 
+Optional full mode:
+
+```json
+{
+  "network": "base",
+  "poolAddress": "0x...",
+  "detailLevel": "full"
+}
+```
+
 Or discover by token pair:
 
 ```json
@@ -164,6 +176,33 @@ Or discover by token pair:
   "quoteAddress": "0x..."
 }
 ```
+
+Basic mode returns the agent-friendly pool summary. Full mode adds:
+
+- pool type and token scales
+- borrow rate, lender interest margin, and rate-update timestamp
+- pool debt, debt in auction, pending inflator, pending interest factor
+- pledged collateral and reserve-auction state
+
+### `inspect-bucket`
+
+```json
+{
+  "network": "base",
+  "poolAddress": "0x...",
+  "bucketIndex": 3232
+}
+```
+
+This returns normalized bucket-level liquidity data:
+
+- price
+- quote tokens
+- collateral
+- bucket LP
+- bucket scale
+- exchange rate
+- collateral dust
 
 ### `inspect-position`
 

@@ -50,6 +50,18 @@ All commands accept one JSON payload argument and print one JSON result.
 node dist/cli.js inspect-pool '{"network":"base","poolAddress":"0x..."}'
 ```
 
+For a fuller pool-state readout:
+
+```bash
+node dist/cli.js inspect-pool '{"network":"base","poolAddress":"0x...","detailLevel":"full"}'
+```
+
+### Inspect bucket
+
+```bash
+node dist/cli.js inspect-bucket '{"network":"base","poolAddress":"0x...","bucketIndex":3232}'
+```
+
 ### Inspect position
 
 ```bash
@@ -118,5 +130,7 @@ node dist/cli.js execute-prepared '{"preparedAction":{...}}'
 - v1 officially supports OpenClaw and Hermes only.
 - The skill stays inside the shared AgentSkills subset to keep behavior portable.
 - Ajna lend and borrow actions in v1 still target ERC20 pools only.
+- `inspect-pool` defaults to a basic summary; use `"detailLevel":"full"` for lower-level rate, debt, and reserve-auction state.
+- `inspect-bucket` is the dedicated pool-liquidity read for a single bucket index.
 - v1 also supports preparing ERC20 and ERC721 approvals to a pool/operator target.
 - `prepare-unsupported-ajna-action` is the explicit advanced escape hatch for unsupported Ajna-native calls.
