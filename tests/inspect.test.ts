@@ -3,24 +3,10 @@ import { BigNumber, ethers } from "ethers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AjnaAdapter } from "../src/sdk.js";
-import type { RuntimeConfig } from "../src/types.js";
+import { mockBaseProvider } from "./helpers/provider.js";
+import { buildTestRuntime } from "./helpers/runtime.js";
 
-const runtime: RuntimeConfig = {
-  mode: "inspect",
-  unsafeUnsupportedActionsEnabled: false,
-  networks: {
-    base: {
-      network: "base",
-      chainId: 8453,
-      rpcUrl: "http://127.0.0.1:8545",
-      ajnaToken: "0x0000000000000000000000000000000000000010",
-      erc20PoolFactory: "0x0000000000000000000000000000000000000020",
-      erc721PoolFactory: "0x0000000000000000000000000000000000000030",
-      poolInfoUtils: "0x0000000000000000000000000000000000000040",
-      positionManager: "0x0000000000000000000000000000000000000050"
-    }
-  }
-};
+const runtime = buildTestRuntime({ mode: "inspect" });
 
 function namedTuple<T extends Record<string, unknown>>(values: unknown[], named: T): T {
   return Object.assign(values, named) as T;
@@ -87,10 +73,7 @@ describe("AjnaAdapter inspect helpers", () => {
       lenderInterestMargin: vi.fn()
     };
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
+    mockBaseProvider();
     vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue(pool as never);
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
       deployedPools: vi.fn().mockResolvedValue(poolAddress)
@@ -175,10 +158,7 @@ describe("AjnaAdapter inspect helpers", () => {
       lenderInterestMargin: vi.fn().mockResolvedValue(BigNumber.from(31))
     };
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
+    mockBaseProvider();
     vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue(pool as never);
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
       deployedPools: vi.fn().mockResolvedValue(poolAddress)
@@ -242,10 +222,7 @@ describe("AjnaAdapter inspect helpers", () => {
       )
     };
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
+    mockBaseProvider();
     vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue(pool as never);
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
       deployedPools: vi.fn().mockResolvedValue(poolAddress)

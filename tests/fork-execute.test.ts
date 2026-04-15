@@ -50,6 +50,7 @@ const shouldRunApproveErc20 =
 
 const shouldRunApproveErc721 =
   shouldRunBase &&
+  Boolean(process.env.AJNA_TEST_ERC721_POOL_ADDRESS ?? process.env.AJNA_TEST_POOL_ADDRESS) &&
   Boolean(process.env.AJNA_TEST_ERC721_TOKEN_ADDRESS) &&
   Boolean(process.env.AJNA_TEST_ERC721_TOKEN_ID) &&
   Boolean(process.env.AJNA_TEST_ERC721_HOLDER);
@@ -319,7 +320,7 @@ describe("fork-backed execute flow", () => {
 
   runApproveErc721("executes a standalone ERC721 approval and rejects replay after the nonce changes", async () => {
     const rpcUrl = process.env.AJNA_RPC_URL_BASE!;
-    const poolAddress = process.env.AJNA_TEST_POOL_ADDRESS!;
+    const poolAddress = process.env.AJNA_TEST_ERC721_POOL_ADDRESS ?? process.env.AJNA_TEST_POOL_ADDRESS!;
     const tokenAddress = ethers.utils.getAddress(process.env.AJNA_TEST_ERC721_TOKEN_ADDRESS!);
     const tokenId = process.env.AJNA_TEST_ERC721_TOKEN_ID!;
     const holderAddress = ethers.utils.getAddress(process.env.AJNA_TEST_ERC721_HOLDER!);

@@ -90,4 +90,28 @@ describe("prepare-unsupported-ajna-action", () => {
       /^function memorializePositions\(address .*?, uint256 tokenId_, uint256\[] indexes_\)$/
     );
   });
+
+  it("rejects generic token-approval methods on the position manager escape hatch", async () => {
+    process.env.AJNA_SKILLS_MODE = "prepare";
+    process.env.AJNA_ENABLE_UNSAFE_SDK_CALLS = "1";
+    process.env.AJNA_RPC_URL_BASE = "http://127.0.0.1:8545";
+
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
+      chainId: 8453,
+      name: "base"
+    });
+
+    await expect(
+      runPrepareUnsupportedAjnaAction({
+        network: "base",
+        actorAddress: "0x0000000000000000000000000000000000000001",
+        contractKind: "position-manager",
+        methodName: "approve",
+        args: ["0x0000000000000000000000000000000000000002", "1"],
+        acknowledgeRisk: UNSAFE_SDK_CALL_ACKNOWLEDGEMENT
+      })
+    ).rejects.toMatchObject({
+      code: "UNSAFE_METHOD_DISALLOWED"
+    });
+  });
 });

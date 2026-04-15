@@ -4,7 +4,7 @@ import { loadRuntimeConfig } from "./config.js";
 import { UNSAFE_SDK_CALL_ACKNOWLEDGEMENT } from "./constants.js";
 import { AjnaSkillError, invariant } from "./errors.js";
 import { validatePreparedAction } from "./prepared.js";
-import { AjnaAdapter, assertProviderMatchesNetwork, resolveCreatedPoolAddress } from "./sdk.js";
+import { AjnaAdapter, buildNetworkProvider, resolveCreatedPoolAddress } from "./sdk.js";
 import type {
   BucketInspectionResult,
   ExecutePreparedInput,
@@ -126,8 +126,7 @@ export async function runExecutePrepared(
       expected: [`AJNA_RPC_URL_${input.preparedAction.network.toUpperCase()}`, "AJNA_RPC_URL"]
     }
   );
-  const provider = new ethers.providers.JsonRpcProvider(network.rpcUrl, network.chainId);
-  await assertProviderMatchesNetwork(provider, network);
+  const provider = await buildNetworkProvider(network);
   const signer = new ethers.Wallet(runtime.signerPrivateKey, provider);
   const signerAddress = await signer.getAddress();
 
@@ -189,11 +188,21 @@ export async function runExecutePrepared(
       gasLimit: computeExecutionGasLimit(gasEstimate, blockGasLimit)
     });
     const receipt = await response.wait(confirmations);
+    invariant(
+      receipt.status === 1,
+      "EXECUTE_TRANSACTION_REVERTED",
+      "Prepared transaction reverted after it was submitted",
+      {
+        label: tx.label,
+        hash: response.hash,
+        status: receipt.status ?? null
+      }
+    );
 
     submitted.push({
       label: tx.label,
       hash: response.hash,
-      status: receipt.status ?? 0,
+      status: receipt.status,
       gasUsed: receipt.gasUsed.toString()
     });
   }

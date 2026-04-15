@@ -49,7 +49,7 @@ export interface PrepareLendInput extends PoolSelector {
   amount: string;
   bucketIndex: number;
   ttlSeconds?: number;
-  approvalMode?: "exact" | "max";
+  approvalMode?: "exact";
 }
 
 export interface PrepareCreateErc20PoolInput {
@@ -76,7 +76,7 @@ export interface PrepareBorrowInput extends PoolSelector {
   amount: string;
   collateralAmount: string;
   limitIndex: number;
-  approvalMode?: "exact" | "max";
+  approvalMode?: "exact";
   maxAgeSeconds?: number;
 }
 
@@ -152,6 +152,8 @@ export interface PreparedAction {
   metadata: Record<string, string | number | boolean | null>;
   digest: string;
   signature: string | null;
+  signatureStatus: "signed" | "unsigned";
+  signatureReason: "signer_mismatch" | "missing_signer" | null;
 }
 
 export interface RuntimeNetworkConfig {

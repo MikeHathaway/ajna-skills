@@ -1,130 +1,40 @@
 import { ethers } from "ethers";
 import { describe, expect, it } from "vitest";
 
-import { finalizePreparedAction, validatePreparedAction } from "../src/prepared.js";
-import type { RuntimeConfig } from "../src/types.js";
+import { validatePreparedAction } from "../src/prepared.js";
+import { buildPreparedFixture } from "./helpers/prepared.js";
+import { buildTestRuntime } from "./helpers/runtime.js";
 
 describe("prepared action integrity", () => {
   it("signs and validates when signer matches actor", async () => {
     const wallet = ethers.Wallet.createRandom();
-    const runtime: RuntimeConfig = {
+    const runtime = buildTestRuntime({
       mode: "execute",
       signerPrivateKey: wallet.privateKey,
-      executeSignerAddress: wallet.address,
-      unsafeUnsupportedActionsEnabled: false,
-      networks: {
-        base: {
-          network: "base",
-          chainId: 8453,
-          rpcUrl: "http://localhost:8545",
-          ajnaToken: "0x0000000000000000000000000000000000000001",
-          erc20PoolFactory: "0x0000000000000000000000000000000000000002",
-          erc721PoolFactory: "0x0000000000000000000000000000000000000003",
-          poolInfoUtils: "0x0000000000000000000000000000000000000004",
-          positionManager: "0x0000000000000000000000000000000000000005"
-        },
-        ethereum: {
-          network: "ethereum",
-          chainId: 1,
-          rpcUrl: "http://localhost:8545",
-          ajnaToken: "0x0000000000000000000000000000000000000011",
-          erc20PoolFactory: "0x0000000000000000000000000000000000000012",
-          erc721PoolFactory: "0x0000000000000000000000000000000000000013",
-          poolInfoUtils: "0x0000000000000000000000000000000000000014",
-          positionManager: "0x0000000000000000000000000000000000000015"
-        }
-      }
-    };
+      executeSignerAddress: wallet.address
+    });
 
-    const prepared = await finalizePreparedAction(
-      {
-        version: 1,
-        kind: "lend",
-        network: "base",
-        chainId: 8453,
-        actorAddress: wallet.address,
-        startingNonce: 7,
-        poolAddress: "0x0000000000000000000000000000000000000100",
-        quoteAddress: "0x0000000000000000000000000000000000000101",
-        collateralAddress: "0x0000000000000000000000000000000000000102",
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        transactions: [
-          {
-            label: "action",
-            target: "0x0000000000000000000000000000000000000100",
-            value: "0",
-            data: "0x1234",
-            from: wallet.address
-          }
-        ],
-        metadata: {
-          amount: "100"
-        }
-      },
-      runtime
-    );
+    const prepared = await buildPreparedFixture(wallet, { startingNonce: 7 }, runtime);
 
     expect(prepared.signature).toBeTruthy();
+    expect(prepared.signatureStatus).toBe("signed");
+    expect(prepared.signatureReason).toBeNull();
     expect(() => validatePreparedAction(prepared, runtime)).not.toThrow();
   });
 
   it("rejects tampered payloads", async () => {
     const wallet = ethers.Wallet.createRandom();
-    const runtime: RuntimeConfig = {
+    const runtime = buildTestRuntime({
       mode: "execute",
       signerPrivateKey: wallet.privateKey,
-      executeSignerAddress: wallet.address,
-      unsafeUnsupportedActionsEnabled: false,
-      networks: {
-        base: {
-          network: "base",
-          chainId: 8453,
-          rpcUrl: "http://localhost:8545",
-          ajnaToken: "0x0000000000000000000000000000000000000001",
-          erc20PoolFactory: "0x0000000000000000000000000000000000000002",
-          erc721PoolFactory: "0x0000000000000000000000000000000000000003",
-          poolInfoUtils: "0x0000000000000000000000000000000000000004",
-          positionManager: "0x0000000000000000000000000000000000000005"
-        },
-        ethereum: {
-          network: "ethereum",
-          chainId: 1,
-          rpcUrl: "http://localhost:8545",
-          ajnaToken: "0x0000000000000000000000000000000000000011",
-          erc20PoolFactory: "0x0000000000000000000000000000000000000012",
-          erc721PoolFactory: "0x0000000000000000000000000000000000000013",
-          poolInfoUtils: "0x0000000000000000000000000000000000000014",
-          positionManager: "0x0000000000000000000000000000000000000015"
-        }
-      }
-    };
+      executeSignerAddress: wallet.address
+    });
 
-    const prepared = await finalizePreparedAction(
+    const prepared = await buildPreparedFixture(
+      wallet,
       {
-        version: 1,
         kind: "borrow",
-        network: "base",
-        chainId: 8453,
-        actorAddress: wallet.address,
-        startingNonce: 11,
-        poolAddress: "0x0000000000000000000000000000000000000100",
-        quoteAddress: "0x0000000000000000000000000000000000000101",
-        collateralAddress: "0x0000000000000000000000000000000000000102",
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        transactions: [
-          {
-            label: "action",
-            target: "0x0000000000000000000000000000000000000100",
-            value: "0",
-            data: "0x1234",
-            from: wallet.address
-          }
-        ],
-        metadata: {
-          amount: "100"
-        }
+        startingNonce: 11
       },
       runtime
     );
@@ -138,5 +48,19 @@ describe("prepared action integrity", () => {
     };
 
     expect(() => validatePreparedAction(tampered, runtime)).toThrow(/digest/i);
+  });
+
+  it("marks prepared payloads as unsigned when no matching signer is available", async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const runtime = buildTestRuntime({
+      mode: "prepare",
+      networks: {}
+    });
+
+    const prepared = await buildPreparedFixture(wallet, { startingNonce: 1 }, runtime);
+
+    expect(prepared.signature).toBeNull();
+    expect(prepared.signatureStatus).toBe("unsigned");
+    expect(prepared.signatureReason).toBe("missing_signer");
   });
 });

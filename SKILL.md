@@ -79,6 +79,8 @@ export AJNA_ENABLE_UNSAFE_SDK_CALLS="1"
 
 1. Inspect first with `inspect-pool`, `inspect-bucket`, or `inspect-position`.
 2. Prepare exactly one action and review the normalized prepared payload.
+   Check `signatureStatus` and `signatureReason`; unsigned payloads are dry-runs,
+   not execution-ready artifacts.
 3. Execute only from `execute-prepared`.
 4. Verify the result with a follow-up inspect call or allowance/position check.
 
@@ -148,6 +150,9 @@ node dist/cli.js prepare-lend '{"network":"base","poolAddress":"0x...","actorAdd
 `amount` is an Ajna WAD-sized action amount. Exact approvals are converted to
 raw token units from the pool token scale. Omitting `approvalMode` defaults to
 `"exact"`.
+If the existing allowance is already sufficient, coupled lend preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled lend preparation.
 
 Prepare borrow:
 
@@ -157,6 +162,9 @@ node dist/cli.js prepare-borrow '{"network":"base","poolAddress":"0x...","actorA
 
 `amount` and `collateralAmount` are Ajna WAD-sized action amounts.
 Omitting `approvalMode` defaults to `"exact"`.
+If the existing allowance is already sufficient, coupled borrow preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled borrow preparation.
 
 Prepare ERC20 approval:
 
@@ -187,6 +195,8 @@ node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x..."
 `tokenAddress` must match the pool's collateral NFT collection.
 If the requested approval is already satisfied, prepare fails instead of
 returning an empty payload.
+For fork tests, use a dedicated `AJNA_TEST_ERC721_POOL_ADDRESS` fixture when the
+ERC721 pool differs from the ERC20 pool used for lend/borrow.
 
 Execute a reviewed payload:
 
@@ -240,13 +250,14 @@ integer range.
 
 - Never execute directly from a fresh user prompt.
 - Always inspect, then prepare, then review, then execute, then verify.
-- Execution preflights the whole prepared sequence before sending the first
-  transaction.
+- Execution estimates and submits each prepared transaction in order. Multi-step
+  execution is not atomic.
 - `execute-prepared` only works in `AJNA_SKILLS_MODE=execute`.
 - If a prepared payload is unsigned, stale, mutated, or nonce-invalid,
   execution should fail.
 - Unsupported Ajna actions require both the env gate and the exact
-  acknowledgement phrase.
+  acknowledgement phrase, and they are limited to allowlisted Ajna-native
+  methods.
 
 ## References
 

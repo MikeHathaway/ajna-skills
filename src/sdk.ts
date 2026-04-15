@@ -58,7 +58,7 @@ type AjnaPoolTargetContext =
       poolAddress: string;
       quoteAddress: string;
       collateralAddress: string;
-      subsetHash: string;
+      subsetHash: string | null;
     };
 
 const ERC721_APPROVAL_ABI = [
@@ -76,6 +76,42 @@ const UNSAFE_CONTRACT_ABIS: Record<UnsupportedAjnaContractKind, UnsafeContractAb
   "position-manager": PositionManager__factory.abi,
   "ajna-token": AjnaToken__factory.abi
 };
+const UNSAFE_ALLOWED_METHODS: Record<UnsupportedAjnaContractKind, Set<string>> = {
+  "erc20-pool": buildUnsafeStateMutatingMethodAllowlist(ERC20Pool__factory.abi, [
+    "initialize(uint256)",
+    "multicall(bytes[])"
+  ]),
+  "erc721-pool": buildUnsafeStateMutatingMethodAllowlist(ERC721Pool__factory.abi, [
+    "initialize(uint256[],uint256)",
+    "multicall(bytes[])"
+  ]),
+  "position-manager": new Set([
+    "burn(address,uint256)",
+    "memorializePositions(address,uint256,uint256[])",
+    "mint(address,address,bytes32)",
+    "moveLiquidity(address,uint256,uint256,uint256,uint256)",
+    "redeemPositions(address,uint256,uint256[])"
+  ]),
+  "ajna-token": new Set([
+    "delegate(address)",
+    "delegateBySig(address,uint256,uint256,uint8,bytes32,bytes32)"
+  ])
+};
+
+function buildUnsafeStateMutatingMethodAllowlist(
+  abi: UnsafeContractAbi,
+  disallowedSignatures: string[]
+): Set<string> {
+  const iface = new ethers.utils.Interface(abi);
+  const blocked = new Set(disallowedSignatures);
+
+  return new Set(
+    Object.values(iface.functions)
+      .filter((fragment) => fragment.stateMutability !== "view" && fragment.stateMutability !== "pure")
+      .map((fragment) => fragment.format(ethers.utils.FormatTypes.sighash))
+      .filter((signature) => !blocked.has(signature))
+  );
+}
 
 export class AjnaAdapter {
   constructor(private readonly runtime: RuntimeConfig) {}
@@ -272,7 +308,12 @@ export class AjnaAdapter {
     const factory = ERC20PoolFactory__factory.connect(network.erc20PoolFactory, provider);
     await this.assertFactoryInterestRateRange(factory, interestRate);
 
-    const existingPoolAddress = await factory.deployedPools(ERC20_NON_SUBSET_HASH, collateralAddress, quoteAddress);
+    const existingPoolAddress = await this.lookupDeployedPool(
+      factory,
+      ERC20_NON_SUBSET_HASH,
+      collateralAddress,
+      quoteAddress
+    );
     invariant(
       existingPoolAddress === ethers.constants.AddressZero,
       "POOL_ALREADY_EXISTS",
@@ -341,7 +382,12 @@ export class AjnaAdapter {
     const factory = ERC721PoolFactory__factory.connect(network.erc721PoolFactory, provider);
     await this.assertFactoryInterestRateRange(factory, interestRate);
 
-    const existingPoolAddress = await factory.deployedPools(subsetHash, collateralAddress, quoteAddress);
+    const existingPoolAddress = await this.lookupDeployedPool(
+      factory,
+      subsetHash,
+      collateralAddress,
+      quoteAddress
+    );
     invariant(
       existingPoolAddress === ethers.constants.AddressZero,
       "POOL_ALREADY_EXISTS",
@@ -356,8 +402,14 @@ export class AjnaAdapter {
 
     const tx = await this.prepareContractTransaction({
       contract: factory,
-      methodName: "deployPool(address,address,uint256[],uint256)",
-      args: [collateralAddress, quoteAddress, tokenIds, interestRate],
+      methodName:
+        tokenIds.length === 0
+          ? "deployPool(address,address,uint256)"
+          : "deployPool(address,address,uint256[],uint256)",
+      args:
+        tokenIds.length === 0
+          ? [collateralAddress, quoteAddress, interestRate]
+          : [collateralAddress, quoteAddress, tokenIds, interestRate],
       from: actorAddress,
       label: "action"
     });
@@ -395,6 +447,11 @@ export class AjnaAdapter {
     const actorAddress = ethers.utils.getAddress(input.actorAddress);
     const amount = BigNumber.from(input.amount);
     const approvalMode = input.approvalMode ?? "exact";
+    invariant(
+      approvalMode === "exact",
+      "UNSAFE_APPROVAL_MODE",
+      "Coupled lend preparation only supports exact approvals"
+    );
     const startingNonce = await provider.getTransactionCount(actorAddress, "pending");
     const poolContext = input.poolAddress
       ? await this.loadAjnaErc20PoolContext(input.poolAddress, network, provider)
@@ -418,17 +475,19 @@ export class AjnaAdapter {
     const expiry = (await this.latestTimestamp(provider)) + (input.ttlSeconds ?? DEFAULT_TTL_SECONDS);
     const transactions = [];
 
-    transactions.push(
-      ...(await this.buildErc20ApprovalTransactions({
-        provider,
-        tokenAddress: poolContext.quoteAddress,
-        actorAddress,
-        approvalTarget: poolContext.poolAddress,
-        currentAllowance: approval.current,
-        neededAllowance: approval.needed,
-        approvalMode
-      }))
-    );
+    if (approval.current.lt(approval.needed)) {
+      transactions.push(
+        ...(await this.buildErc20ApprovalTransactions({
+          provider,
+          tokenAddress: poolContext.quoteAddress,
+          actorAddress,
+          approvalTarget: poolContext.poolAddress,
+          currentAllowance: approval.current,
+          neededAllowance: approval.needed,
+          approvalMode
+        }))
+      );
+    }
 
     const lendTx = await this.prepareContractTransaction({
       contract: ERC20Pool__factory.connect(poolContext.poolAddress, provider),
@@ -457,6 +516,7 @@ export class AjnaAdapter {
         metadata: {
           amount: amount.toString(),
           approvalAmount: approvalAmount.toString(),
+          approvalAlreadySufficient: approval.current.gte(approval.needed),
           bucketIndex: input.bucketIndex,
           approvalMode
         }
@@ -472,6 +532,11 @@ export class AjnaAdapter {
     const amount = BigNumber.from(input.amount);
     const collateralAmount = BigNumber.from(input.collateralAmount);
     const approvalMode = input.approvalMode ?? "exact";
+    invariant(
+      approvalMode === "exact",
+      "UNSAFE_APPROVAL_MODE",
+      "Coupled borrow preparation only supports exact approvals"
+    );
     const startingNonce = await provider.getTransactionCount(actorAddress, "pending");
     const poolContext = input.poolAddress
       ? await this.loadAjnaErc20PoolContext(input.poolAddress, network, provider)
@@ -495,17 +560,19 @@ export class AjnaAdapter {
     const expiresAt = await this.expirationIso(provider, input.maxAgeSeconds);
     const transactions = [];
 
-    transactions.push(
-      ...(await this.buildErc20ApprovalTransactions({
-        provider,
-        tokenAddress: poolContext.collateralAddress,
-        actorAddress,
-        approvalTarget: poolContext.poolAddress,
-        currentAllowance: approval.current,
-        neededAllowance: approval.needed,
-        approvalMode
-      }))
-    );
+    if (approval.current.lt(approval.needed)) {
+      transactions.push(
+        ...(await this.buildErc20ApprovalTransactions({
+          provider,
+          tokenAddress: poolContext.collateralAddress,
+          actorAddress,
+          approvalTarget: poolContext.poolAddress,
+          currentAllowance: approval.current,
+          neededAllowance: approval.needed,
+          approvalMode
+        }))
+      );
+    }
 
     const borrowTx = await this.prepareContractTransaction({
       contract: ERC20Pool__factory.connect(poolContext.poolAddress, provider),
@@ -535,6 +602,7 @@ export class AjnaAdapter {
           amount: amount.toString(),
           collateralAmount: collateralAmount.toString(),
           approvalAmount: approvalAmount.toString(),
+          approvalAlreadySufficient: approval.current.gte(approval.needed),
           limitIndex: input.limitIndex,
           approvalMode
         }
@@ -622,9 +690,11 @@ export class AjnaAdapter {
     const token = new ethers.Contract(tokenAddress, ERC721_APPROVAL_ABI, provider);
     const expiresAt = await this.expirationIso(provider, input.maxAgeSeconds);
     const transactions = [];
+    let alreadyApproved = false;
+    let tokenIdMetadata: string | null = null;
 
     if (approveForAll) {
-      const alreadyApproved = await token.isApprovedForAll(actorAddress, approvalTarget);
+      alreadyApproved = await token.isApprovedForAll(actorAddress, approvalTarget);
 
       if (!alreadyApproved) {
         const approveTx = await this.prepareContractTransaction({
@@ -647,67 +717,51 @@ export class AjnaAdapter {
           approveForAll: true
         }
       );
-
-      return finalizePreparedAction(
-        {
-          version: 1,
-          kind: "approve-erc721",
-          network: input.network,
-          chainId: network.chainId,
-          actorAddress,
-          startingNonce,
-          poolAddress: approvalTarget,
-          quoteAddress: tokenAddress,
-          collateralAddress: tokenAddress,
-          createdAt: new Date().toISOString(),
-          expiresAt,
-          transactions,
-          metadata: {
-            tokenStandard: "erc721",
-            tokenAddress,
-            approvalTarget,
-            approveForAll: true,
-            alreadyApproved
-          }
-        },
-        this.runtime
+    } else {
+      invariant(
+        input.tokenId !== undefined,
+        "MISSING_TOKEN_ID",
+        "ERC721 approval requires tokenId unless approveForAll is true"
       );
-    }
 
-    invariant(
-      input.tokenId !== undefined,
-      "MISSING_TOKEN_ID",
-      "ERC721 approval requires tokenId unless approveForAll is true"
-    );
+      const tokenId = BigNumber.from(input.tokenId);
+      tokenIdMetadata = tokenId.toString();
+      const [approvedAddress, operatorApproved] = await Promise.all([
+        token.getApproved(tokenId),
+        token.isApprovedForAll(actorAddress, approvalTarget)
+      ]);
+      alreadyApproved =
+        operatorApproved || ethers.utils.getAddress(approvedAddress) === approvalTarget;
 
-    const tokenId = BigNumber.from(input.tokenId);
-    const [approvedAddress, operatorApproved] = await Promise.all([
-      token.getApproved(tokenId),
-      token.isApprovedForAll(actorAddress, approvalTarget)
-    ]);
-    const alreadyApproved =
-      operatorApproved || ethers.utils.getAddress(approvedAddress) === approvalTarget;
-
-    if (!alreadyApproved) {
-      const approveTx = await this.prepareContractTransaction({
-        contract: token,
-        methodName: "approve",
-        args: [approvalTarget, tokenId],
-        from: actorAddress,
-        label: "approval"
-      });
-      transactions.push(approveTx);
+      if (!alreadyApproved) {
+        const approveTx = await this.prepareContractTransaction({
+          contract: token,
+          methodName: "approve",
+          args: [approvalTarget, tokenId],
+          from: actorAddress,
+          label: "approval"
+        });
+        transactions.push(approveTx);
+      }
     }
 
     invariant(
       transactions.length > 0,
       "APPROVAL_ALREADY_SATISFIED",
-      "Requested ERC721 approval already matches the requested target state",
-      {
-        tokenAddress,
-        approvalTarget,
-        tokenId: tokenId.toString()
-      }
+      approveForAll
+        ? "Requested ERC721 operator approval already matches the requested target state"
+        : "Requested ERC721 approval already matches the requested target state",
+      approveForAll
+        ? {
+            tokenAddress,
+            approvalTarget,
+            approveForAll: true
+          }
+        : {
+            tokenAddress,
+            approvalTarget,
+            tokenId: tokenIdMetadata
+          }
     );
 
     return finalizePreparedAction(
@@ -728,8 +782,8 @@ export class AjnaAdapter {
           tokenStandard: "erc721",
           tokenAddress,
           approvalTarget,
-          tokenId: tokenId.toString(),
-          approveForAll: false,
+          tokenId: tokenIdMetadata,
+          approveForAll,
           alreadyApproved
         }
       },
@@ -801,9 +855,7 @@ export class AjnaAdapter {
   }
 
   private async provider(network: RuntimeNetworkConfig): Promise<ethers.providers.JsonRpcProvider> {
-    const provider = new ethers.providers.JsonRpcProvider(network.rpcUrl, network.chainId);
-    await assertProviderMatchesNetwork(provider, network);
-    return provider;
+    return buildNetworkProvider(network);
   }
 
   private async resolvePoolAddress(
@@ -822,7 +874,8 @@ export class AjnaAdapter {
     );
 
     const factory = ERC20PoolFactory__factory.connect(network.erc20PoolFactory, provider);
-    const poolAddress = await factory.deployedPools(
+    const poolAddress = await this.lookupDeployedPool(
+      factory,
       ERC20_NON_SUBSET_HASH,
       ethers.utils.getAddress(selector.collateralAddress),
       ethers.utils.getAddress(selector.quoteAddress)
@@ -1106,16 +1159,9 @@ export class AjnaAdapter {
       pool.collateralScale()
     ]);
     const factory = ERC20PoolFactory__factory.connect(network.erc20PoolFactory, provider);
-    const canonicalPoolAddress = await factory.deployedPools(
-      ERC20_NON_SUBSET_HASH,
-      collateralAddress,
-      quoteAddress
-    );
-
-    invariant(
-      canonicalPoolAddress !== ethers.constants.AddressZero &&
-        ethers.utils.getAddress(canonicalPoolAddress) === normalizedPoolAddress,
-      "INVALID_AJNA_POOL",
+    this.assertCanonicalPoolDeployment(
+      await this.lookupDeployedPool(factory, ERC20_NON_SUBSET_HASH, collateralAddress, quoteAddress),
+      normalizedPoolAddress,
       "Provided poolAddress is not a deployed Ajna ERC20 pool",
       {
         poolAddress: normalizedPoolAddress,
@@ -1146,28 +1192,42 @@ export class AjnaAdapter {
       pool.collateralAddress(),
       pool.isSubset()
     ]);
-    const subsetHash = isSubset
-      ? await this.findErc721SubsetHashForPool(normalizedPoolAddress, network, provider)
-      : ERC721_NON_SUBSET_HASH;
     const factory = ERC721PoolFactory__factory.connect(network.erc721PoolFactory, provider);
-    const canonicalPoolAddress = await factory.deployedPools(
-      subsetHash,
-      collateralAddress,
-      quoteAddress
-    );
+    let subsetHash: string | null = null;
 
-    invariant(
-      canonicalPoolAddress !== ethers.constants.AddressZero &&
-        ethers.utils.getAddress(canonicalPoolAddress) === normalizedPoolAddress,
-      "INVALID_AJNA_POOL",
-      "Provided poolAddress is not a deployed Ajna ERC721 pool",
-      {
-        poolAddress: normalizedPoolAddress,
-        collateralAddress,
-        quoteAddress,
-        subsetHash
+    if (isSubset) {
+      const deployedPools = await this.loadErc721DeployedPools(factory);
+      invariant(
+        deployedPools.some((address) => address === normalizedPoolAddress),
+        "INVALID_AJNA_POOL",
+        "Provided poolAddress is not a deployed Ajna ERC721 subset pool",
+        {
+          poolAddress: normalizedPoolAddress,
+          collateralAddress,
+          quoteAddress
+        }
+      );
+
+      try {
+        subsetHash = await this.findErc721SubsetHashForPool(normalizedPoolAddress, network, provider);
+      } catch {
+        subsetHash = null;
       }
-    );
+    } else {
+      this.assertCanonicalPoolDeployment(
+        await this.lookupDeployedPool(factory, ERC721_NON_SUBSET_HASH, collateralAddress, quoteAddress),
+        normalizedPoolAddress,
+        "Provided poolAddress is not a deployed Ajna ERC721 pool",
+        {
+          poolAddress: normalizedPoolAddress,
+          collateralAddress,
+          quoteAddress,
+          subsetHash: ERC721_NON_SUBSET_HASH
+        }
+      );
+
+      subsetHash = ERC721_NON_SUBSET_HASH;
+    }
 
     return {
       kind: "erc721-pool",
@@ -1176,6 +1236,52 @@ export class AjnaAdapter {
       collateralAddress,
       subsetHash
     };
+  }
+
+  private async loadErc721DeployedPools(
+    factory: ReturnType<typeof ERC721PoolFactory__factory.connect>
+  ): Promise<string[]> {
+    try {
+      return (await factory.getDeployedPoolsList()).map((address) => ethers.utils.getAddress(address));
+    } catch {
+      throw new AjnaSkillError(
+        "AJNA_POOL_VALIDATION_UNAVAILABLE",
+        "Could not validate Ajna ERC721 pool membership from the factory",
+        {
+          factoryAddress: factory.address
+        }
+      );
+    }
+  }
+
+  private async lookupDeployedPool(
+    factory: {
+      deployedPools: (
+        subsetHash: string,
+        collateralAddress: string,
+        quoteAddress: string
+      ) => Promise<string>;
+    },
+    subsetHash: string,
+    collateralAddress: string,
+    quoteAddress: string
+  ): Promise<string> {
+    return factory.deployedPools(subsetHash, collateralAddress, quoteAddress);
+  }
+
+  private assertCanonicalPoolDeployment(
+    canonicalPoolAddress: string,
+    poolAddress: string,
+    message: string,
+    details: Record<string, unknown>
+  ): void {
+    invariant(
+      canonicalPoolAddress !== ethers.constants.AddressZero &&
+        ethers.utils.getAddress(canonicalPoolAddress) === poolAddress,
+      "INVALID_AJNA_POOL",
+      message,
+      details
+    );
   }
 
   private async loadAjnaPoolTargetContext(
@@ -1263,6 +1369,7 @@ export class AjnaAdapter {
       const fragment = ethers.utils.FunctionFragment.from(input.abiFragment);
       const signature = fragment.format(ethers.utils.FormatTypes.sighash);
       const builtinFragment = iface.getFunction(signature);
+      this.assertUnsafeMethodAllowed(input.contractKind, signature);
 
       return {
         abi,
@@ -1274,10 +1381,12 @@ export class AjnaAdapter {
 
     if (input.methodName.includes("(")) {
       const fragment = iface.getFunction(input.methodName);
+      const signature = fragment.format(ethers.utils.FormatTypes.sighash);
+      this.assertUnsafeMethodAllowed(input.contractKind, signature);
       return {
         abi,
         abiFragment: fragment.format(ethers.utils.FormatTypes.full),
-        methodName: fragment.format(ethers.utils.FormatTypes.sighash),
+        methodName: signature,
         source: "builtin"
       };
     }
@@ -1302,13 +1411,30 @@ export class AjnaAdapter {
         candidates: fragments.map((fragment) => fragment.format(ethers.utils.FormatTypes.sighash))
       }
     );
+    const signature = fragments[0]!.format(ethers.utils.FormatTypes.sighash);
+    this.assertUnsafeMethodAllowed(input.contractKind, signature);
 
     return {
       abi,
       abiFragment: fragments[0]!.format(ethers.utils.FormatTypes.full),
-      methodName: fragments[0]!.format(ethers.utils.FormatTypes.sighash),
+      methodName: signature,
       source: "builtin"
     };
+  }
+
+  private assertUnsafeMethodAllowed(
+    contractKind: UnsupportedAjnaContractKind,
+    methodSignature: string
+  ): void {
+    invariant(
+      UNSAFE_ALLOWED_METHODS[contractKind].has(methodSignature),
+      "UNSAFE_METHOD_DISALLOWED",
+      "Requested unsupported Ajna method is outside the allowed Ajna-native escape hatch surface",
+      {
+        contractKind,
+        methodSignature
+      }
+    );
   }
 
   private normalizeSubsetTokenIds(tokenIds: string[] | undefined): string[] {
@@ -1527,6 +1653,14 @@ export async function resolveCreatedPoolAddress(
   }
 
   return undefined;
+}
+
+export async function buildNetworkProvider(
+  network: RuntimeNetworkConfig
+): Promise<ethers.providers.JsonRpcProvider> {
+  const provider = new ethers.providers.JsonRpcProvider(network.rpcUrl, network.chainId);
+  await assertProviderMatchesNetwork(provider, network);
+  return provider;
 }
 
 export async function assertProviderMatchesNetwork(

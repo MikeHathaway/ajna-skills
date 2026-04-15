@@ -8,26 +8,12 @@ import { BigNumber, ethers } from "ethers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runExecutePrepared } from "../src/actions.js";
-import { finalizePreparedAction } from "../src/prepared.js";
 import { AjnaAdapter } from "../src/sdk.js";
-import type { RuntimeConfig } from "../src/types.js";
+import { buildPreparedFixture } from "./helpers/prepared.js";
+import { mockBaseProvider } from "./helpers/provider.js";
+import { buildTestRuntime } from "./helpers/runtime.js";
 
-const runtime: RuntimeConfig = {
-  mode: "prepare",
-  unsafeUnsupportedActionsEnabled: false,
-  networks: {
-    base: {
-      network: "base",
-      chainId: 8453,
-      rpcUrl: "http://127.0.0.1:8545",
-      ajnaToken: "0x0000000000000000000000000000000000000010",
-      erc20PoolFactory: "0x0000000000000000000000000000000000000020",
-      erc721PoolFactory: "0x0000000000000000000000000000000000000030",
-      poolInfoUtils: "0x0000000000000000000000000000000000000040",
-      positionManager: "0x0000000000000000000000000000000000000050"
-    }
-  }
-};
+const runtime = buildTestRuntime();
 const ORIGINAL_ENV = { ...process.env };
 
 describe("pool creation flows", () => {
@@ -53,15 +39,8 @@ describe("pool creation flows", () => {
       deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
     };
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getBlock").mockResolvedValue({
-      timestamp: 1_700_000_000
-    } as never);
+    mockBaseProvider({ nonce: 7 });
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(7);
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue(factory as never);
     vi.spyOn(ERC20__factory, "connect").mockReturnValue({
       decimals: vi.fn().mockResolvedValue(18)
@@ -114,15 +93,8 @@ describe("pool creation flows", () => {
       deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
     };
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getBlock").mockResolvedValue({
-      timestamp: 1_700_000_000
-    } as never);
+    mockBaseProvider({ nonce: 11 });
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(11);
     vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue(factory as never);
     vi.spyOn(ERC721__factory, "connect").mockReturnValue({
       supportsInterface: vi.fn().mockResolvedValue(true)
@@ -162,6 +134,63 @@ describe("pool creation flows", () => {
     expect(typeof preparedAction.metadata.subsetHash).toBe("string");
   });
 
+  it("prepares an ERC721 collection pool with the non-subset deploy overload", async () => {
+    const actorAddress = "0x00000000000000000000000000000000000000A9";
+    const collateralAddress = "0x00000000000000000000000000000000000000B9";
+    const quoteAddress = "0x00000000000000000000000000000000000000C9";
+    const preparedTransaction = {
+      label: "action" as const,
+      target: runtime.networks.base!.erc721PoolFactory,
+      value: "0",
+      data: "0xfacefeed",
+      from: actorAddress
+    };
+    const factory = {
+      MIN_RATE: vi.fn().mockResolvedValue(BigNumber.from("10000000000000000")),
+      MAX_RATE: vi.fn().mockResolvedValue(BigNumber.from("100000000000000000")),
+      deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
+    };
+
+    mockBaseProvider({ nonce: 12 });
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
+    vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue(factory as never);
+    vi.spyOn(ERC721__factory, "connect").mockReturnValue({
+      supportsInterface: vi.fn().mockResolvedValue(true)
+    } as never);
+    vi.spyOn(ERC20__factory, "connect").mockReturnValue({
+      decimals: vi.fn().mockResolvedValue(6)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+    const txSpy = vi
+      .spyOn(adapter as never, "prepareContractTransaction")
+      .mockResolvedValue(preparedTransaction);
+
+    const preparedAction = await adapter.prepareCreateErc721Pool({
+      network: "base",
+      actorAddress,
+      collateralAddress,
+      quoteAddress,
+      interestRate: "50000000000000000",
+      tokenIds: []
+    });
+
+    expect(txSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        methodName: "deployPool(address,address,uint256)",
+        args: [
+          ethers.utils.getAddress(collateralAddress),
+          ethers.utils.getAddress(quoteAddress),
+          BigNumber.from("50000000000000000")
+        ]
+      })
+    );
+    expect(preparedAction.metadata.subsetHash).toBe(
+      "0x93e3b87db48beb11f82ff978661ba6e96f72f582300e9724191ab4b5d7964364"
+    );
+    expect(preparedAction.metadata.collateralType).toBe("erc721-collection");
+  });
+
   it("returns resolvedPoolAddress after executing an ERC20 pool creation payload", async () => {
     const wallet = ethers.Wallet.createRandom();
     const resolvedPoolAddress = "0x0000000000000000000000000000000000000ABC";
@@ -170,19 +199,12 @@ describe("pool creation flows", () => {
     process.env.AJNA_SIGNER_PRIVATE_KEY = wallet.privateKey;
     process.env.AJNA_RPC_URL_BASE = "http://127.0.0.1:8545";
 
-    const preparedAction = await finalizePreparedAction(
+    const preparedAction = await buildPreparedFixture(
+      wallet,
       {
-        version: 1,
         kind: "create-erc20-pool",
-        network: "base",
-        chainId: 8453,
-        actorAddress: wallet.address,
         startingNonce: 3,
         poolAddress: runtime.networks.base!.erc20PoolFactory,
-        quoteAddress: "0x0000000000000000000000000000000000000101",
-        collateralAddress: "0x0000000000000000000000000000000000000102",
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
         transactions: [
           {
             label: "action",
@@ -199,19 +221,14 @@ describe("pool creation flows", () => {
           collateralType: "erc20"
         }
       },
-      {
-        ...runtime,
+      buildTestRuntime({
         mode: "execute",
         signerPrivateKey: wallet.privateKey,
         executeSignerAddress: wallet.address
-      }
+      })
     );
 
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(3);
+    mockBaseProvider({ nonce: 3 });
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "estimateGas").mockResolvedValue(BigNumber.from(21_000));
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
       deployedPools: vi.fn().mockResolvedValue(resolvedPoolAddress)
@@ -231,10 +248,7 @@ describe("pool creation flows", () => {
   });
 
   it("rejects ERC20 pool creation when the token addresses are not deployed contracts", async () => {
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
+    mockBaseProvider();
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x");
 
     const adapter = new AjnaAdapter(runtime);
@@ -253,10 +267,7 @@ describe("pool creation flows", () => {
   });
 
   it("rejects ERC721 pool creation when the collateral token does not implement ERC721", async () => {
-    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
-      chainId: 8453,
-      name: "base"
-    });
+    mockBaseProvider();
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
     vi.spyOn(ERC721__factory, "connect").mockReturnValue({
       supportsInterface: vi.fn().mockResolvedValue(false)

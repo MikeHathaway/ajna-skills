@@ -2,13 +2,12 @@ import { ethers } from "ethers";
 
 import { canonicalize } from "./json.js";
 import { AjnaSkillError, invariant } from "./errors.js";
-import type {
-  PreparedAction,
-  PreparedTransaction,
-  RuntimeConfig
-} from "./types.js";
+import type { PreparedAction, PreparedTransaction, RuntimeConfig } from "./types.js";
 
-type UnsignedPreparedAction = Omit<PreparedAction, "digest" | "signature">;
+type UnsignedPreparedAction = Omit<
+  PreparedAction,
+  "digest" | "signature" | "signatureStatus" | "signatureReason"
+>;
 
 export async function finalizePreparedAction(
   unsigned: UnsignedPreparedAction,
@@ -20,15 +19,24 @@ export async function finalizePreparedAction(
     : undefined;
 
   let signature: string | null = null;
+  let signatureStatus: PreparedAction["signatureStatus"] = "unsigned";
+  let signatureReason: PreparedAction["signatureReason"] = null;
 
   if (signer && sameAddress(signer.address, unsigned.actorAddress)) {
     signature = await signer.signMessage(ethers.utils.arrayify(digest));
+    signatureStatus = "signed";
+  } else if (signer) {
+    signatureReason = "signer_mismatch";
+  } else {
+    signatureReason = "missing_signer";
   }
 
   return {
     ...unsigned,
     digest,
-    signature
+    signature,
+    signatureStatus,
+    signatureReason
   };
 }
 
@@ -99,6 +107,15 @@ export function validatePreparedAction(
     preparedAction.signature,
     "UNSIGNED_PREPARED_ACTION",
     "Prepared action was not signed by the execution signer"
+  );
+  invariant(
+    preparedAction.signatureStatus === "signed",
+    "UNSIGNED_PREPARED_ACTION",
+    "Prepared action was not signed by the execution signer",
+    {
+      signatureStatus: preparedAction.signatureStatus,
+      signatureReason: preparedAction.signatureReason
+    }
   );
 
   const recovered = ethers.utils.verifyMessage(
