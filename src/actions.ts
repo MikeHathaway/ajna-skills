@@ -150,7 +150,7 @@ export async function runExecutePrepared(
 
   const confirmations = input.confirmations ?? 1;
   const submitted: ExecutePreparedResult["submitted"] = [];
-  const preparedTransactions = [];
+  const blockGasLimit = await readLatestBlockGasLimit(provider);
 
   for (const [index, tx] of input.preparedAction.transactions.entries()) {
     const expectedNonce = input.preparedAction.startingNonce + index;
@@ -184,22 +184,14 @@ export async function runExecutePrepared(
       });
     }
 
-    preparedTransactions.push({
-      tx,
-      estimateInput,
-      gasEstimate
-    });
-  }
-
-  for (const prepared of preparedTransactions) {
     const response = await signer.sendTransaction({
-      ...prepared.estimateInput,
-      gasLimit: prepared.gasEstimate.mul(3)
+      ...estimateInput,
+      gasLimit: computeExecutionGasLimit(gasEstimate, blockGasLimit)
     });
     const receipt = await response.wait(confirmations);
 
     submitted.push({
-      label: prepared.tx.label,
+      label: tx.label,
       hash: response.hash,
       status: receipt.status ?? 0,
       gasUsed: receipt.gasUsed.toString()
@@ -215,4 +207,34 @@ export async function runExecutePrepared(
     resolvedPoolAddress,
     submitted
   };
+}
+
+async function readLatestBlockGasLimit(
+  provider: ethers.providers.JsonRpcProvider
+): Promise<ethers.BigNumber | undefined> {
+  try {
+    const latestBlock = await provider.getBlock("latest");
+    return latestBlock?.gasLimit ? ethers.BigNumber.from(latestBlock.gasLimit) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function computeExecutionGasLimit(
+  gasEstimate: ethers.BigNumber,
+  blockGasLimit: ethers.BigNumber | undefined
+): ethers.BigNumber {
+  const buffer = ethers.BigNumber.from(25_000);
+  const padded = gasEstimate.add(gasEstimate.div(5)).add(buffer);
+
+  if (!blockGasLimit) {
+    return padded;
+  }
+
+  const ceiling = blockGasLimit.sub(blockGasLimit.div(20));
+  if (gasEstimate.gte(ceiling)) {
+    return gasEstimate;
+  }
+
+  return padded.gt(ceiling) ? ceiling : padded;
 }

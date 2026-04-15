@@ -146,7 +146,8 @@ node dist/cli.js prepare-lend '{"network":"base","poolAddress":"0x...","actorAdd
 ```
 
 `amount` is an Ajna WAD-sized action amount. Exact approvals are converted to
-raw token units from the pool token scale.
+raw token units from the pool token scale. Omitting `approvalMode` defaults to
+`"exact"`.
 
 Prepare borrow:
 
@@ -155,14 +156,18 @@ node dist/cli.js prepare-borrow '{"network":"base","poolAddress":"0x...","actorA
 ```
 
 `amount` and `collateralAmount` are Ajna WAD-sized action amounts.
+Omitting `approvalMode` defaults to `"exact"`.
 
 Prepare ERC20 approval:
 
 ```bash
-node dist/cli.js prepare-approve-erc20 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","amount":"1000000000000000000","approvalMode":"exact"}'
+node dist/cli.js prepare-approve-erc20 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","amount":"1000000","approvalMode":"exact"}'
 ```
 
 `poolAddress` must be a real Ajna pool on the selected network.
+`tokenAddress` must match the pool's quote token or collateral token.
+`amount` is a raw token-unit allowance amount, not an Ajna WAD-sized action amount.
+Omitting `approvalMode` defaults to `"exact"`.
 If the requested allowance is already satisfied, prepare fails instead of
 returning an empty payload.
 
@@ -179,6 +184,7 @@ node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x..."
 ```
 
 `poolAddress` must be a real Ajna pool on the selected network.
+`tokenAddress` must match the pool's collateral NFT collection.
 If the requested approval is already satisfied, prepare fails instead of
 returning an empty payload.
 

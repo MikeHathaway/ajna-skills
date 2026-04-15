@@ -1,4 +1,9 @@
-import { ERC20__factory, ERC20PoolFactory__factory, ERC721PoolFactory__factory } from "@ajna-finance/sdk";
+import {
+  ERC20__factory,
+  ERC20PoolFactory__factory,
+  ERC721__factory,
+  ERC721PoolFactory__factory
+} from "@ajna-finance/sdk";
 import { BigNumber, ethers } from "ethers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -119,6 +124,9 @@ describe("pool creation flows", () => {
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(11);
     vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue(factory as never);
+    vi.spyOn(ERC721__factory, "connect").mockReturnValue({
+      supportsInterface: vi.fn().mockResolvedValue(true)
+    } as never);
     vi.spyOn(ERC20__factory, "connect").mockReturnValue({
       decimals: vi.fn().mockResolvedValue(6)
     } as never);
@@ -237,6 +245,34 @@ describe("pool creation flows", () => {
         actorAddress: "0x00000000000000000000000000000000000000A3",
         collateralAddress: "0x00000000000000000000000000000000000000B3",
         quoteAddress: "0x00000000000000000000000000000000000000C3",
+        interestRate: "50000000000000000"
+      })
+    ).rejects.toMatchObject({
+      code: "INVALID_POOL_TOKENS"
+    });
+  });
+
+  it("rejects ERC721 pool creation when the collateral token does not implement ERC721", async () => {
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getNetwork").mockResolvedValue({
+      chainId: 8453,
+      name: "base"
+    });
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getCode").mockResolvedValue("0x1234");
+    vi.spyOn(ERC721__factory, "connect").mockReturnValue({
+      supportsInterface: vi.fn().mockResolvedValue(false)
+    } as never);
+    vi.spyOn(ERC20__factory, "connect").mockReturnValue({
+      decimals: vi.fn().mockResolvedValue(6)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+
+    await expect(
+      adapter.prepareCreateErc721Pool({
+        network: "base",
+        actorAddress: "0x00000000000000000000000000000000000000A4",
+        collateralAddress: "0x00000000000000000000000000000000000000B4",
+        quoteAddress: "0x00000000000000000000000000000000000000C4",
         interestRate: "50000000000000000"
       })
     ).rejects.toMatchObject({

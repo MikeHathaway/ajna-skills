@@ -24,6 +24,9 @@
     "ethers": "^5.7.2",
     "tslib": "^2.8.1"
   },
+  "overrides": {
+    "ethcall": "git+https://github.com/imbaniac/ethcall.git#84482231e36efa3796aaab9ed0fa1a3c332a07ee"
+  },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "tsx": "^4.19.4",

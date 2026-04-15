@@ -59,4 +59,32 @@ describe("prepare-time verification", () => {
       code: "PREPARE_VERIFICATION_FAILED"
     });
   });
+
+  it("allows dependent transaction preparation when verification is deferred", async () => {
+    const adapter = new AjnaAdapter(runtime);
+
+    createTransactionMock.mockResolvedValue({
+      _transaction: {
+        to: "0x00000000000000000000000000000000000000B1",
+        value: BigNumber.from(0),
+        data: "0x1234",
+        nonce: 0
+      },
+      verify: vi.fn().mockRejectedValue(new Error("allowance not updated yet"))
+    });
+
+    await expect(
+      (adapter as never).prepareContractTransaction({
+        contract: { address: "0x00000000000000000000000000000000000000B1" },
+        methodName: "approve",
+        args: ["0x00000000000000000000000000000000000000B1", 1],
+        from: "0x00000000000000000000000000000000000000A1",
+        label: "approval",
+        allowVerifyFailure: true
+      })
+    ).resolves.toMatchObject({
+      label: "approval",
+      gasEstimate: undefined
+    });
+  });
 });

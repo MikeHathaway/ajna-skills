@@ -248,7 +248,7 @@ Lender bucket position:
 
 `amount` is an Ajna WAD-sized action amount. For `"approvalMode":"exact"`, the
 skill derives the ERC20 approval amount from the pool token scale instead of
-reusing the WAD value directly.
+reusing the WAD value directly. Omitting `approvalMode` defaults to `"exact"`.
 
 ### `prepare-create-erc20-pool`
 
@@ -316,7 +316,8 @@ them for Ajna pool lookup.
 
 `amount` and `collateralAmount` are Ajna WAD-sized action amounts. For
 `"approvalMode":"exact"`, the collateral approval is converted to raw token
-units using the pool collateral scale.
+units using the pool collateral scale. Omitting `approvalMode` defaults to
+`"exact"`.
 
 ### `prepare-approve-erc20`
 
@@ -326,16 +327,19 @@ units using the pool collateral scale.
   "actorAddress": "0x...",
   "tokenAddress": "0x...",
   "poolAddress": "0x...",
-  "amount": "1000000000000000000",
+  "amount": "1000000",
   "approvalMode": "exact",
   "maxAgeSeconds": 600
 }
 ```
 
 `poolAddress` must be a real Ajna pool on the selected network. This command no
-longer allows arbitrary spender approvals through a fake or unrelated target.
-If the existing allowance already matches the requested state, prepare now fails
-instead of returning an empty no-op payload.
+longer allows arbitrary spender approvals through a fake or unrelated target,
+and `tokenAddress` must match that pool's quote token or collateral token.
+`amount` is a raw token-unit allowance amount, not an Ajna WAD-sized action
+amount. Omitting `approvalMode` defaults to `"exact"`. If the existing
+allowance already matches the requested state, prepare now fails instead of
+returning an empty no-op payload.
 
 ### `prepare-approve-erc721`
 

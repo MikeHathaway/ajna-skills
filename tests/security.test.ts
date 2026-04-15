@@ -206,6 +206,99 @@ describe("AjnaAdapter safety checks", () => {
     });
   });
 
+  it("rejects standalone ERC20 approvals for tokens unrelated to the Ajna pool", async () => {
+    mockBaseNetwork();
+    mockErc20Pool();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(9);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+
+    await expect(
+      adapter.prepareApproveErc20({
+        network: "base",
+        actorAddress,
+        tokenAddress: "0x00000000000000000000000000000000000000EE",
+        poolAddress,
+        amount: "10"
+      })
+    ).rejects.toMatchObject({
+      code: "INVALID_APPROVAL_TOKEN"
+    });
+  });
+
+  it("rejects standalone ERC721 approvals unless the token is the pool collateral collection", async () => {
+    mockBaseNetwork();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(9);
+    vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      quoteTokenScale: vi.fn().mockResolvedValue(BigNumber.from("1")),
+      collateralScale: vi.fn().mockResolvedValue(BigNumber.from("1"))
+    } as never);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
+    } as never);
+    vi.spyOn(ERC721Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      isSubset: vi.fn().mockResolvedValue(false)
+    } as never);
+    vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+
+    await expect(
+      adapter.prepareApproveErc721({
+        network: "base",
+        actorAddress,
+        tokenAddress: quoteAddress,
+        poolAddress,
+        tokenId: "1"
+      })
+    ).rejects.toMatchObject({
+      code: "INVALID_APPROVAL_TOKEN"
+    });
+  });
+
+  it("surfaces ERC721 pool validation outages instead of mislabeling them as fake pools", async () => {
+    mockBaseNetwork();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(9);
+    vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      quoteTokenScale: vi.fn().mockResolvedValue(BigNumber.from("1")),
+      collateralScale: vi.fn().mockResolvedValue(BigNumber.from("1"))
+    } as never);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
+    } as never);
+    vi.spyOn(ERC721Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      isSubset: vi.fn().mockResolvedValue(true)
+    } as never);
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getLogs").mockRejectedValue(new Error("range capped"));
+
+    const adapter = new AjnaAdapter(runtime);
+
+    await expect(
+      adapter.prepareApproveErc721({
+        network: "base",
+        actorAddress,
+        tokenAddress: collateralAddress,
+        poolAddress,
+        tokenId: "1"
+      })
+    ).rejects.toMatchObject({
+      code: "AJNA_POOL_VALIDATION_UNAVAILABLE"
+    });
+  });
+
   it("zero-resets ERC20 allowance before raising a non-zero approval", async () => {
     mockBaseNetwork();
     mockErc20Pool();
@@ -246,10 +339,92 @@ describe("AjnaAdapter safety checks", () => {
     expect(txSpy.mock.calls[1]?.[0].args).toEqual([poolAddress, BigNumber.from(10)]);
   });
 
-  it("rejects standalone ERC20 approval when allowance is already satisfied", async () => {
+  it("can raise an existing ERC20 allowance to max", async () => {
     mockBaseNetwork();
     mockErc20Pool();
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(11);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+    vi.spyOn(adapter as never, "checkAllowance").mockResolvedValue({
+      current: BigNumber.from(5),
+      needed: BigNumber.from(10),
+      approvalTarget: poolAddress
+    });
+    const txSpy = vi.spyOn(adapter as never, "prepareContractTransaction").mockImplementation(
+      async ({ label, methodName, args }) =>
+        ({
+          label,
+          target: poolAddress,
+          value: "0",
+          data: `0x${methodName}`,
+          from: actorAddress,
+          args
+        }) as never
+    );
+
+    const preparedAction = await adapter.prepareApproveErc20({
+      network: "base",
+      actorAddress,
+      tokenAddress: quoteAddress,
+      poolAddress,
+      amount: "10",
+      approvalMode: "max"
+    });
+
+    expect(preparedAction.transactions).toHaveLength(2);
+    expect(txSpy.mock.calls[0]?.[0].args).toEqual([poolAddress, 0]);
+    expect(txSpy.mock.calls[1]?.[0].args).toEqual([poolAddress, ethers.constants.MaxUint256]);
+    expect(preparedAction.metadata.alreadyApproved).toBe(false);
+  });
+
+  it("can reduce an oversized ERC20 allowance to the requested exact amount", async () => {
+    mockBaseNetwork();
+    mockErc20Pool();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(12);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+    vi.spyOn(adapter as never, "checkAllowance").mockResolvedValue({
+      current: ethers.constants.MaxUint256,
+      needed: BigNumber.from(10),
+      approvalTarget: poolAddress
+    });
+    const txSpy = vi.spyOn(adapter as never, "prepareContractTransaction").mockImplementation(
+      async ({ label, methodName, args }) =>
+        ({
+          label,
+          target: poolAddress,
+          value: "0",
+          data: `0x${methodName}`,
+          from: actorAddress,
+          args
+        }) as never
+    );
+
+    const preparedAction = await adapter.prepareApproveErc20({
+      network: "base",
+      actorAddress,
+      tokenAddress: quoteAddress,
+      poolAddress,
+      amount: "10",
+      approvalMode: "exact"
+    });
+
+    expect(preparedAction.transactions).toHaveLength(2);
+    expect(txSpy.mock.calls[0]?.[0].args).toEqual([poolAddress, 0]);
+    expect(txSpy.mock.calls[1]?.[0].args).toEqual([poolAddress, BigNumber.from(10)]);
+    expect(preparedAction.metadata.alreadyApproved).toBe(false);
+  });
+
+  it("rejects standalone ERC20 approval when allowance is already satisfied", async () => {
+    mockBaseNetwork();
+    mockErc20Pool();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(13);
     vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
       deployedPools: vi.fn().mockResolvedValue(poolAddress)
     } as never);

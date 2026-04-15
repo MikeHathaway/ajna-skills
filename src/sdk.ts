@@ -4,6 +4,7 @@ import {
   ERC20PoolFactory__factory,
   ERC721Pool__factory,
   ERC721PoolFactory__factory,
+  ERC721__factory,
   ERC20__factory,
   PoolInfoUtils__factory,
   PositionManager__factory,
@@ -66,6 +67,7 @@ const ERC721_APPROVAL_ABI = [
   "function isApprovedForAll(address owner, address operator) view returns (bool)",
   "function setApprovalForAll(address operator, bool approved)"
 ] as const;
+const ERC721_INTERFACE_ID = "0x80ac58cd";
 const WAD = BigNumber.from("1000000000000000000");
 type UnsafeContractAbi = ReadonlyArray<any>;
 const UNSAFE_CONTRACT_ABIS: Record<UnsupportedAjnaContractKind, UnsafeContractAbi> = {
@@ -329,7 +331,7 @@ export class AjnaAdapter {
       "Collateral and quote token addresses must differ"
     );
     await Promise.all([
-      this.assertContractHasCode(provider, collateralAddress, "ERC721 pool collateral token"),
+      this.assertErc721Compatible(provider, collateralAddress, "ERC721 pool collateral token"),
       this.assertFungibleTokenCompatible(provider, quoteAddress, "ERC721 pool quote token")
     ]);
 
@@ -433,7 +435,8 @@ export class AjnaAdapter {
       methodName: "addQuoteToken",
       args: [amount, input.bucketIndex, expiry],
       from: actorAddress,
-      label: "action"
+      label: "action",
+      allowVerifyFailure: transactions.length > 0
     });
     transactions.push(lendTx);
 
@@ -509,7 +512,8 @@ export class AjnaAdapter {
       methodName: "drawDebt",
       args: [actorAddress, amount, input.limitIndex, collateralAmount],
       from: actorAddress,
-      label: "action"
+      label: "action",
+      allowVerifyFailure: transactions.length > 0
     });
     transactions.push(borrowTx);
 
@@ -546,10 +550,12 @@ export class AjnaAdapter {
     const poolTarget = await this.loadAjnaPoolTargetContext(input.poolAddress, network, provider);
     const approvalTarget = poolTarget.poolAddress;
     const tokenAddress = ethers.utils.getAddress(input.tokenAddress);
+    this.assertApproveErc20TokenMatchesPool(tokenAddress, poolTarget);
     const amount = BigNumber.from(input.amount);
     const approvalMode = input.approvalMode ?? "exact";
     const startingNonce = await provider.getTransactionCount(actorAddress, "pending");
     const approval = await this.checkAllowance(provider, tokenAddress, actorAddress, approvalTarget, amount);
+    const desiredAllowance = this.desiredErc20Allowance(amount, approvalMode);
     const expiresAt = await this.expirationIso(provider, input.maxAgeSeconds);
     const transactions = [];
 
@@ -596,7 +602,7 @@ export class AjnaAdapter {
           approvalTarget,
           amount: amount.toString(),
           approvalMode,
-          alreadyApproved: approval.current.gte(approval.needed)
+          alreadyApproved: approval.current.eq(desiredAllowance)
         }
       },
       this.runtime
@@ -610,6 +616,7 @@ export class AjnaAdapter {
     const poolTarget = await this.loadAjnaPoolTargetContext(input.poolAddress, network, provider);
     const approvalTarget = poolTarget.poolAddress;
     const tokenAddress = ethers.utils.getAddress(input.tokenAddress);
+    this.assertApproveErc721TokenMatchesPool(tokenAddress, poolTarget);
     const approveForAll = input.approveForAll ?? false;
     const startingNonce = await provider.getTransactionCount(actorAddress, "pending");
     const token = new ethers.Contract(tokenAddress, ERC721_APPROVAL_ABI, provider);
@@ -907,6 +914,30 @@ export class AjnaAdapter {
     );
   }
 
+  private async assertErc721Compatible(
+    provider: ethers.providers.Provider,
+    tokenAddress: string,
+    label: string
+  ): Promise<void> {
+    await this.assertContractHasCode(provider, tokenAddress, label);
+
+    let supportsErc721 = false;
+
+    try {
+      supportsErc721 = await ERC721__factory.connect(tokenAddress, provider).supportsInterface(
+        ERC721_INTERFACE_ID
+      );
+    } catch {
+      throw new AjnaSkillError("INVALID_POOL_TOKENS", `${label} must implement ERC721`, {
+        tokenAddress
+      });
+    }
+
+    invariant(supportsErc721, "INVALID_POOL_TOKENS", `${label} must implement ERC721`, {
+      tokenAddress
+    });
+  }
+
   private sanitizeSymbol(symbol: string): string | null {
     const trimmed = symbol.trim();
 
@@ -957,16 +988,17 @@ export class AjnaAdapter {
     neededAllowance: BigNumber;
     approvalMode: "exact" | "max";
   }) {
-    if (currentAllowance.gte(neededAllowance) && !neededAllowance.isZero()) {
+    const desiredAllowance = this.desiredErc20Allowance(neededAllowance, approvalMode);
+
+    if (currentAllowance.eq(desiredAllowance)) {
       return [];
     }
 
     const token = ERC20__factory.connect(tokenAddress, provider);
-    const desiredAllowance =
-      approvalMode === "max" ? ethers.constants.MaxUint256 : neededAllowance;
     const transactions = [];
+    const requiresReset = !currentAllowance.isZero();
 
-    if (!currentAllowance.isZero()) {
+    if (requiresReset) {
       transactions.push(
         await this.prepareContractTransaction({
           contract: token,
@@ -988,11 +1020,76 @@ export class AjnaAdapter {
         methodName: "approve",
         args: [approvalTarget, desiredAllowance],
         from: actorAddress,
-        label: "approval"
+        label: "approval",
+        allowVerifyFailure: requiresReset
       })
     );
 
     return transactions;
+  }
+
+  private desiredErc20Allowance(
+    neededAllowance: BigNumber,
+    approvalMode: "exact" | "max"
+  ): BigNumber {
+    return approvalMode === "max" ? ethers.constants.MaxUint256 : neededAllowance;
+  }
+
+  private assertApproveErc20TokenMatchesPool(
+    tokenAddress: string,
+    poolTarget: AjnaPoolTargetContext
+  ): void {
+    if (poolTarget.kind === "erc20-pool") {
+      invariant(
+        tokenAddress === poolTarget.quoteAddress || tokenAddress === poolTarget.collateralAddress,
+        "INVALID_APPROVAL_TOKEN",
+        "ERC20 approval token must match the Ajna pool quote or collateral token",
+        {
+          tokenAddress,
+          poolAddress: poolTarget.poolAddress,
+          quoteAddress: poolTarget.quoteAddress,
+          collateralAddress: poolTarget.collateralAddress
+        }
+      );
+      return;
+    }
+
+    invariant(
+      tokenAddress === poolTarget.quoteAddress,
+      "INVALID_APPROVAL_TOKEN",
+      "ERC721 pool ERC20 approval token must match the Ajna pool quote token",
+      {
+        tokenAddress,
+        poolAddress: poolTarget.poolAddress,
+        quoteAddress: poolTarget.quoteAddress
+      }
+    );
+  }
+
+  private assertApproveErc721TokenMatchesPool(
+    tokenAddress: string,
+    poolTarget: AjnaPoolTargetContext
+  ): void {
+    invariant(
+      poolTarget.kind === "erc721-pool",
+      "INVALID_APPROVAL_TOKEN",
+      "ERC721 approvals are only valid for Ajna ERC721 pools",
+      {
+        tokenAddress,
+        poolAddress: poolTarget.poolAddress
+      }
+    );
+
+    invariant(
+      tokenAddress === poolTarget.collateralAddress,
+      "INVALID_APPROVAL_TOKEN",
+      "ERC721 approval token must match the Ajna pool collateral collection",
+      {
+        tokenAddress,
+        poolAddress: poolTarget.poolAddress,
+        collateralAddress: poolTarget.collateralAddress
+      }
+    );
   }
 
   private async loadAjnaErc20PoolContext(
@@ -1088,13 +1185,19 @@ export class AjnaAdapter {
   ): Promise<AjnaPoolTargetContext> {
     try {
       return await this.loadAjnaErc20PoolContext(poolAddress, network, provider);
-    } catch {
+    } catch (error) {
+      if (!(error instanceof AjnaSkillError) || error.code !== "INVALID_AJNA_POOL") {
+        throw error;
+      }
       // fall through to ERC721 validation
     }
 
     try {
       return await this.loadAjnaErc721PoolContext(poolAddress, network, provider);
-    } catch {
+    } catch (error) {
+      if (!(error instanceof AjnaSkillError) || error.code !== "INVALID_AJNA_POOL") {
+        throw error;
+      }
       // fall through to the explicit error below
     }
 
@@ -1114,12 +1217,25 @@ export class AjnaAdapter {
   ): Promise<string> {
     const iface = new ethers.utils.Interface(ERC721PoolFactory__factory.abi);
     const topic = iface.getEventTopic("PoolCreated");
-    const logs = await provider.getLogs({
-      address: network.erc721PoolFactory,
-      topics: [topic],
-      fromBlock: 0,
-      toBlock: "latest"
-    });
+    let logs: ethers.providers.Log[];
+
+    try {
+      logs = await provider.getLogs({
+        address: network.erc721PoolFactory,
+        topics: [topic],
+        fromBlock: 0,
+        toBlock: "latest"
+      });
+    } catch {
+      throw new AjnaSkillError(
+        "AJNA_POOL_VALIDATION_UNAVAILABLE",
+        "Could not validate Ajna ERC721 pool subset hash from factory logs",
+        {
+          poolAddress,
+          factoryAddress: network.erc721PoolFactory
+        }
+      );
+    }
 
     for (const log of logs) {
       const parsed = iface.parseLog(log);
@@ -1253,7 +1369,8 @@ export class AjnaAdapter {
     args,
     from,
     label,
-    value
+    value,
+    allowVerifyFailure = false
   }: {
     contract: ethers.Contract;
     methodName: string;
@@ -1261,6 +1378,7 @@ export class AjnaAdapter {
     from: string;
     label: "approval" | "action";
     value?: string;
+    allowVerifyFailure?: boolean;
   }) {
     const wrapped = (await createTransaction(
       contract,
@@ -1277,19 +1395,21 @@ export class AjnaAdapter {
     const tx = wrapped._transaction;
     invariant(tx, "SDK_TRANSACTION_PRIVATE_SHAPE", "Ajna SDK transaction did not expose populated transaction");
 
-    let gasEstimate: BigNumber;
+    let gasEstimate: BigNumber | undefined;
 
     try {
       gasEstimate = await wrapped.verify();
     } catch (error) {
-      throw new AjnaSkillError(
-        "PREPARE_VERIFICATION_FAILED",
-        "Prepared transaction failed verification before it was signed",
-        {
-          label,
-          reason: error instanceof Error ? error.message : String(error)
-        }
-      );
+      if (!allowVerifyFailure) {
+        throw new AjnaSkillError(
+          "PREPARE_VERIFICATION_FAILED",
+          "Prepared transaction failed verification before it was signed",
+          {
+            label,
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
     }
 
     return {
@@ -1304,7 +1424,7 @@ export class AjnaAdapter {
           : typeof tx.nonce === "number"
             ? tx.nonce
             : BigNumber.from(tx.nonce).toNumber(),
-      gasEstimate: gasEstimate.toString()
+      gasEstimate: gasEstimate?.toString()
     };
   }
 
