@@ -49,7 +49,7 @@ export interface PrepareLendInput extends PoolSelector {
   amount: string;
   bucketIndex: number;
   ttlSeconds?: number;
-  approvalMode?: "exact" | "max";
+  approvalMode?: "exact";
 }
 
 export interface PrepareCreateErc20PoolInput {
@@ -76,7 +76,7 @@ export interface PrepareBorrowInput extends PoolSelector {
   amount: string;
   collateralAmount: string;
   limitIndex: number;
-  approvalMode?: "exact" | "max";
+  approvalMode?: "exact";
   maxAgeSeconds?: number;
 }
 
@@ -127,7 +127,6 @@ export interface PreparedTransaction {
   from?: string;
   nonce?: number;
   gasEstimate?: string;
-  verificationError?: string;
 }
 
 export interface PreparedAction {
@@ -153,6 +152,8 @@ export interface PreparedAction {
   metadata: Record<string, string | number | boolean | null>;
   digest: string;
   signature: string | null;
+  signatureStatus: "signed" | "unsigned";
+  signatureReason: "signer_mismatch" | "missing_signer" | null;
 }
 
 export interface RuntimeNetworkConfig {
@@ -191,7 +192,9 @@ export interface ErrorEnvelope {
 export interface PoolInspectionResult {
   network: AjnaNetwork;
   detailLevel: PoolInspectionDetailLevel;
+  poolKind: "erc20-pool" | "erc721-pool";
   poolAddress: string;
+  subsetHash?: string | null;
   collateralAddress: string;
   collateralSymbol: string | null;
   quoteAddress: string;
@@ -221,7 +224,7 @@ export interface PoolInspectionResult {
     config: {
       poolType: number;
       quoteTokenScale: string;
-      collateralScale: string;
+      collateralScale: string | null;
     };
     rates: {
       borrowRate: string;
@@ -244,7 +247,9 @@ export interface PoolInspectionResult {
 
 export interface BucketInspectionResult {
   network: AjnaNetwork;
+  poolKind: "erc20-pool" | "erc721-pool";
   poolAddress: string;
+  subsetHash?: string | null;
   bucketIndex: number;
   bucket: {
     price: string;
@@ -253,7 +258,7 @@ export interface BucketInspectionResult {
     bucketLP: string;
     scale: string;
     exchangeRate: string;
-    collateralDust: string;
+    collateralDust: string | null;
   };
 }
 

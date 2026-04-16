@@ -35,6 +35,10 @@ Pre-v1. This repo is being built to match the approved design and eng review in
 
 Each command will accept a single JSON payload and print normalized JSON output.
 That keeps the public contract explicit and agent-friendly.
+Prepared payloads also include `signatureStatus` and `signatureReason` so an
+unsigned dry-run cannot be mistaken for an execution-ready payload. Signed
+prepared payloads use EIP-712 typed-data signatures scoped to the Ajna Skills
+domain and target chain.
 
 ## Built-in networks
 
@@ -70,6 +74,17 @@ npm run build
 npm test
 ```
 
+### Dependency note
+
+`@ajna-finance/sdk@0.4.7` currently declares a git-sourced `ethcall`
+dependency (`git+https://github.com/imbaniac/ethcall.git#base`). This repo
+pins that transitive dependency in `package.json` via `overrides` to commit
+`84482231e36efa3796aaab9ed0fa1a3c332a07ee` so installs do not float on the
+upstream branch.
+
+That override is intentional. Keep it unless a newer published Ajna SDK removes
+the git dependency or replaces it with a normal registry release.
+
 Optional chain-backed smoke test:
 
 ```bash
@@ -95,6 +110,7 @@ export AJNA_TEST_BORROW_AMOUNT_WAD=1000000000000000000
 export AJNA_TEST_TTL_SECONDS=31536000
 export AJNA_TEST_QUOTE_WHALE="0xee7ae85f2fe2239e27d9c1e23fffe168d63b4055"
 export AJNA_TEST_COLLATERAL_WHALE="0x78f691c07e58fa6808e77915027ea1ca883d721d"
+export AJNA_TEST_ERC721_POOL_ADDRESS="0x..."
 export AJNA_TEST_ERC721_TOKEN_ADDRESS="0x3c1027c40c281835e38d7950d74b3de5f9d21ef4"
 export AJNA_TEST_ERC721_TOKEN_ID=1
 export AJNA_TEST_ERC721_HOLDER="0x75360e6aDe76eA0258BA195Ca0905c5A5D354f68"
@@ -117,8 +133,10 @@ For backward compatibility, the fork runner still accepts the older
 uses the same pinned pool and block, with `AJNA_TEST_COLLATERAL_FUND_AMOUNT_RAW`
 for the AERO transfer, `AJNA_TEST_COLLATERAL_AMOUNT_WAD` for pledged collateral,
 and `AJNA_TEST_BORROW_AMOUNT_WAD` for the borrowed USDC amount. The ERC721 fixture
-uses Ratbase token `1`, transferred from a pinned holder to the test signer before
-executing a standalone approval to the pool target.
+uses `AJNA_TEST_ERC721_POOL_ADDRESS` plus Ratbase token `1`, transferred from a
+pinned holder to the test signer before executing a standalone approval to the
+ERC721 pool target. If you omit `AJNA_TEST_ERC721_POOL_ADDRESS`, the fork runner
+falls back to `AJNA_TEST_POOL_ADDRESS`.
 
 ## Runtime model
 
@@ -143,10 +161,11 @@ npx skills add <owner>/<repo>
 - inspect is always read-only
 - prepare never sends a transaction
 - execute only accepts a previously prepared payload
+- execute estimates and submits each prepared transaction in order; multi-step execution is not atomic
 - execute requires a local signer and explicit policy mode
 - execute rejects RPC endpoints that resolve to the wrong chain
 - execute rejects prepared payloads once the signer nonce has moved, re-prepare instead
-- unsupported Ajna actions are prepare-only and require an explicit env gate plus acknowledgement phrase
+- unsupported Ajna actions are prepare-only, require an explicit env gate plus acknowledgement phrase, and are limited to an allowlisted Ajna-native method surface
 
 ## JSON command contract
 
@@ -179,7 +198,13 @@ Or discover by token pair:
 }
 ```
 
-Basic mode returns the agent-friendly pool summary. Full mode adds:
+When you provide `poolAddress`, inspection works for both Ajna ERC20 and ERC721
+pools. Token-pair discovery can find ERC20 pools and ERC721 collection pools,
+but not ERC721 subset pools; use `resolvedPoolAddress` for those.
+
+Results include `poolKind`, and ERC721 pools also include `subsetHash` when it
+can be resolved. Basic mode returns the agent-friendly pool summary. Full mode
+adds:
 
 - pool type and token scales
 - borrow rate, lender interest margin, and rate-update timestamp
@@ -204,7 +229,7 @@ This returns normalized bucket-level liquidity data:
 - bucket LP
 - bucket scale
 - exchange rate
-- collateral dust
+- collateral dust for ERC20 pools, or `null` for ERC721 pools
 
 ### `inspect-position`
 
@@ -231,6 +256,8 @@ Lender bucket position:
 }
 ```
 
+Borrower position results include `collateralTokenIds` for ERC721 pools.
+
 ### `prepare-lend`
 
 ```json
@@ -244,6 +271,13 @@ Lender bucket position:
   "approvalMode": "exact"
 }
 ```
+
+`amount` is an Ajna WAD-sized action amount. For `"approvalMode":"exact"`, the
+skill derives the ERC20 approval amount from the pool token scale instead of
+reusing the WAD value directly. Omitting `approvalMode` defaults to `"exact"`.
+If the existing allowance is already sufficient, coupled lend preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled lend preparation.
 
 ### `prepare-create-erc20-pool`
 
@@ -309,6 +343,14 @@ them for Ajna pool lookup.
 }
 ```
 
+`amount` and `collateralAmount` are Ajna WAD-sized action amounts. For
+`"approvalMode":"exact"`, the collateral approval is converted to raw token
+units using the pool collateral scale. Omitting `approvalMode` defaults to
+`"exact"`.
+If the existing allowance is already sufficient, coupled borrow preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled borrow preparation.
+
 ### `prepare-approve-erc20`
 
 ```json
@@ -317,11 +359,19 @@ them for Ajna pool lookup.
   "actorAddress": "0x...",
   "tokenAddress": "0x...",
   "poolAddress": "0x...",
-  "amount": "1000000000000000000",
+  "amount": "1000000",
   "approvalMode": "exact",
   "maxAgeSeconds": 600
 }
 ```
+
+`poolAddress` must be a real Ajna pool on the selected network. This command no
+longer allows arbitrary spender approvals through a fake or unrelated target,
+and `tokenAddress` must match that pool's quote token or collateral token.
+`amount` is a raw token-unit allowance amount, not an Ajna WAD-sized action
+amount. Omitting `approvalMode` defaults to `"exact"`. If the existing
+allowance already matches the requested state, prepare now fails instead of
+returning an empty no-op payload.
 
 ### `prepare-approve-erc721`
 
@@ -337,6 +387,41 @@ Single-token approval:
   "maxAgeSeconds": 600
 }
 ```
+
+`poolAddress` must be a real Ajna pool on the selected network.
+If `approveForAll` is omitted, this prepares a single-token `approve(...)` and
+requires `tokenId`.
+
+Operator approval grant for all owned NFTs:
+
+```json
+{
+  "network": "base",
+  "actorAddress": "0x...",
+  "tokenAddress": "0x...",
+  "poolAddress": "0x...",
+  "approveForAll": true,
+  "maxAgeSeconds": 600
+}
+```
+
+Operator approval revoke for all owned NFTs:
+
+```json
+{
+  "network": "base",
+  "actorAddress": "0x...",
+  "tokenAddress": "0x...",
+  "poolAddress": "0x...",
+  "approveForAll": false,
+  "maxAgeSeconds": 600
+}
+```
+
+If `approveForAll` is present, the command prepares a whole-collection operator
+grant or revoke target state instead of a single-token approval. If the NFT
+approval already matches the requested state, prepare now fails instead of
+returning an empty no-op payload.
 
 ### `prepare-unsupported-ajna-action`
 
@@ -365,14 +450,18 @@ Example:
 }
 ```
 
+Pass large integer args such as `uint256`, token IDs, or bucket indexes as
+quoted strings when they may exceed JavaScript's safe integer range.
+
 For pool calls, include `contractAddress`. For `position-manager` and
 `ajna-token`, the skill uses the built-in Ajna address for the selected network
 and rejects mismatches. The skill now resolves the ABI from built-in Ajna
 contract ABIs by `contractKind`, so `abiFragment` is optional. Provide it only
 when you want to disambiguate an overloaded method or pin the exact signature
-explicitly.
+explicitly. Generic ERC20/ERC721 approval and transfer methods are not part of
+this escape hatch; only allowlisted Ajna-native mutations are accepted.
 
-Operator approval for all owned NFTs:
+Operator approval grant for all owned NFTs:
 
 ```json
 {

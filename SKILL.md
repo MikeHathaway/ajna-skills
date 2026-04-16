@@ -79,6 +79,9 @@ export AJNA_ENABLE_UNSAFE_SDK_CALLS="1"
 
 1. Inspect first with `inspect-pool`, `inspect-bucket`, or `inspect-position`.
 2. Prepare exactly one action and review the normalized prepared payload.
+   Check `signatureStatus` and `signatureReason`; unsigned payloads are dry-runs,
+   not execution-ready artifacts. Signed payloads use EIP-712 typed-data
+   signatures scoped to the Ajna Skills domain and target chain.
 3. Execute only from `execute-prepared`.
 4. Verify the result with a follow-up inspect call or allowance/position check.
 
@@ -89,6 +92,8 @@ Preferred examples:
 - Existing borrower: `inspect-position` before modifying debt or collateral.
 - New pool creation: execute, capture `resolvedPoolAddress`, then inspect the
   created pool before doing anything else with it.
+  For ERC721 subset pools, use `resolvedPoolAddress`; token-pair discovery does
+  not find subset pools.
 
 ## Commands
 
@@ -108,11 +113,17 @@ Ask for fuller state when you need rates, debt, or reserve-auction state:
 node dist/cli.js inspect-pool '{"network":"base","poolAddress":"0x...","detailLevel":"full"}'
 ```
 
+Inspection results include `poolKind`, and ERC721 pools include `subsetHash`
+when available.
+
 Inspect one bucket:
 
 ```bash
 node dist/cli.js inspect-bucket '{"network":"base","poolAddress":"0x...","bucketIndex":3232}'
 ```
+
+`collateralDust` is only populated for ERC20 pools. ERC721 pool bucket results
+return `null` for that field.
 
 Inspect a borrower or lender position:
 
@@ -122,6 +133,7 @@ node dist/cli.js inspect-position '{"network":"base","poolAddress":"0x...","owne
 
 For lender positions, also include `bucketIndex` and set
 `"positionType":"lender"`.
+ERC721 borrower inspections also include `collateralTokenIds`.
 
 ### Supported write preparation
 
@@ -145,17 +157,37 @@ Prepare lend:
 node dist/cli.js prepare-lend '{"network":"base","poolAddress":"0x...","actorAddress":"0x...","amount":"1000000000000000000","bucketIndex":1234,"approvalMode":"exact"}'
 ```
 
+`amount` is an Ajna WAD-sized action amount. Exact approvals are converted to
+raw token units from the pool token scale. Omitting `approvalMode` defaults to
+`"exact"`.
+If the existing allowance is already sufficient, coupled lend preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled lend preparation.
+
 Prepare borrow:
 
 ```bash
 node dist/cli.js prepare-borrow '{"network":"base","poolAddress":"0x...","actorAddress":"0x...","amount":"1000000000000000000","collateralAmount":"2000000000000000000","limitIndex":1234,"approvalMode":"exact"}'
 ```
 
+`amount` and `collateralAmount` are Ajna WAD-sized action amounts.
+Omitting `approvalMode` defaults to `"exact"`.
+If the existing allowance is already sufficient, coupled borrow preparation
+leaves it unchanged instead of downgrading it to an exact target.
+`"max"` is intentionally not supported for coupled borrow preparation.
+
 Prepare ERC20 approval:
 
 ```bash
-node dist/cli.js prepare-approve-erc20 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","amount":"1000000000000000000","approvalMode":"exact"}'
+node dist/cli.js prepare-approve-erc20 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","amount":"1000000","approvalMode":"exact"}'
 ```
+
+`poolAddress` must be a real Ajna pool on the selected network.
+`tokenAddress` must match the pool's quote token or collateral token.
+`amount` is a raw token-unit allowance amount, not an Ajna WAD-sized action amount.
+Omitting `approvalMode` defaults to `"exact"`.
+If the requested allowance is already satisfied, prepare fails instead of
+returning an empty payload.
 
 Prepare ERC721 approval:
 
@@ -163,11 +195,27 @@ Prepare ERC721 approval:
 node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","tokenId":"123"}'
 ```
 
-Or operator approval for all NFTs on that collection:
+Or operator approval grant for all NFTs on that collection:
 
 ```bash
 node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","approveForAll":true}'
 ```
+
+Or operator approval revoke for all NFTs on that collection:
+
+```bash
+node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","approveForAll":false}'
+```
+
+`poolAddress` must be a real Ajna pool on the selected network.
+`tokenAddress` must match the pool's collateral NFT collection.
+If `approveForAll` is present, it requests the whole-collection operator target
+state; otherwise the command requires `tokenId` and prepares a single-token
+approval.
+If the requested approval is already satisfied, prepare fails instead of
+returning an empty payload.
+For fork tests, use a dedicated `AJNA_TEST_ERC721_POOL_ADDRESS` fixture when the
+ERC721 pool differs from the ERC20 pool used for lend/borrow.
 
 Execute a reviewed payload:
 
@@ -186,6 +234,8 @@ node dist/cli.js prepare-unsupported-ajna-action '{"network":"base","actorAddres
 Use this only when there is no first-class command for the requested Ajna
 action. It still stays on the same `prepare -> review -> execute` path. It is
 not a direct-execute shortcut.
+Pass large integers as quoted strings when they may exceed JavaScript's safe
+integer range.
 
 ## Pitfalls
 
@@ -219,11 +269,14 @@ not a direct-execute shortcut.
 
 - Never execute directly from a fresh user prompt.
 - Always inspect, then prepare, then review, then execute, then verify.
+- Execution estimates and submits each prepared transaction in order. Multi-step
+  execution is not atomic.
 - `execute-prepared` only works in `AJNA_SKILLS_MODE=execute`.
 - If a prepared payload is unsigned, stale, mutated, or nonce-invalid,
   execution should fail.
 - Unsupported Ajna actions require both the env gate and the exact
-  acknowledgement phrase.
+  acknowledgement phrase, and they are limited to allowlisted Ajna-native
+  methods.
 
 ## References
 
