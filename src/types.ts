@@ -192,7 +192,9 @@ export interface ErrorEnvelope {
 export interface PoolInspectionResult {
   network: AjnaNetwork;
   detailLevel: PoolInspectionDetailLevel;
+  poolKind: "erc20-pool" | "erc721-pool";
   poolAddress: string;
+  subsetHash?: string | null;
   collateralAddress: string;
   collateralSymbol: string | null;
   quoteAddress: string;
@@ -222,7 +224,7 @@ export interface PoolInspectionResult {
     config: {
       poolType: number;
       quoteTokenScale: string;
-      collateralScale: string;
+      collateralScale: string | null;
     };
     rates: {
       borrowRate: string;
@@ -245,7 +247,9 @@ export interface PoolInspectionResult {
 
 export interface BucketInspectionResult {
   network: AjnaNetwork;
+  poolKind: "erc20-pool" | "erc721-pool";
   poolAddress: string;
+  subsetHash?: string | null;
   bucketIndex: number;
   bucket: {
     price: string;
@@ -254,7 +258,7 @@ export interface BucketInspectionResult {
     bucketLP: string;
     scale: string;
     exchangeRate: string;
-    collateralDust: string;
+    collateralDust: string | null;
   };
 }
 

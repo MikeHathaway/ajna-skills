@@ -9,11 +9,44 @@ type UnsignedPreparedAction = Omit<
   "digest" | "signature" | "signatureStatus" | "signatureReason"
 >;
 
+type PreparedActionSignaturePayload = {
+  preparedVersion: number;
+  kind: PreparedAction["kind"];
+  network: PreparedAction["network"];
+  actorAddress: string;
+  poolAddress: string;
+  startingNonce: number;
+  expiresAt: string;
+  digest: string;
+};
+
+type Eip712Types = Record<string, Array<{ name: string; type: string }>>;
+
+const PREPARED_ACTION_EIP712_DOMAIN = {
+  name: "Ajna Prepared Action",
+  version: "1"
+} as const;
+
+export const PREPARED_ACTION_EIP712_TYPES: Eip712Types = {
+  PreparedAction: [
+    { name: "preparedVersion", type: "uint256" },
+    { name: "kind", type: "string" },
+    { name: "network", type: "string" },
+    { name: "actorAddress", type: "address" },
+    { name: "poolAddress", type: "address" },
+    { name: "startingNonce", type: "uint256" },
+    { name: "expiresAt", type: "string" },
+    { name: "digest", type: "bytes32" }
+  ]
+};
+
 export async function finalizePreparedAction(
   unsigned: UnsignedPreparedAction,
   runtime: RuntimeConfig
 ): Promise<PreparedAction> {
   const digest = computePreparedDigest(unsigned);
+  const typedDomain = buildPreparedActionSignatureDomain(unsigned.chainId);
+  const typedPayload = buildPreparedActionSignaturePayload(unsigned, digest);
   const signer = runtime.signerPrivateKey
     ? new ethers.Wallet(runtime.signerPrivateKey)
     : undefined;
@@ -23,7 +56,7 @@ export async function finalizePreparedAction(
   let signatureReason: PreparedAction["signatureReason"] = null;
 
   if (signer && sameAddress(signer.address, unsigned.actorAddress)) {
-    signature = await signer.signMessage(ethers.utils.arrayify(digest));
+    signature = await signer._signTypedData(typedDomain, PREPARED_ACTION_EIP712_TYPES, typedPayload);
     signatureStatus = "signed";
   } else if (signer) {
     signatureReason = "signer_mismatch";
@@ -42,6 +75,32 @@ export async function finalizePreparedAction(
 
 export function computePreparedDigest(unsigned: UnsignedPreparedAction): string {
   return ethers.utils.keccak256(ethers.utils.toUtf8Bytes(canonicalize(unsigned)));
+}
+
+export function buildPreparedActionSignatureDomain(chainId: number): ethers.TypedDataDomain {
+  return {
+    ...PREPARED_ACTION_EIP712_DOMAIN,
+    chainId
+  };
+}
+
+export function buildPreparedActionSignaturePayload(
+  action: Pick<
+    UnsignedPreparedAction,
+    "version" | "kind" | "network" | "actorAddress" | "poolAddress" | "startingNonce" | "expiresAt"
+  >,
+  digest: string
+): PreparedActionSignaturePayload {
+  return {
+    preparedVersion: action.version,
+    kind: action.kind,
+    network: action.network,
+    actorAddress: action.actorAddress,
+    poolAddress: action.poolAddress,
+    startingNonce: action.startingNonce,
+    expiresAt: action.expiresAt,
+    digest
+  };
 }
 
 export function validatePreparedAction(
@@ -80,6 +139,8 @@ export function validatePreparedAction(
   };
 
   const expectedDigest = computePreparedDigest(unsigned);
+  const typedDomain = buildPreparedActionSignatureDomain(preparedAction.chainId);
+  const typedPayload = buildPreparedActionSignaturePayload(unsigned, expectedDigest);
   invariant(
     expectedDigest === preparedAction.digest,
     "PREPARED_DIGEST_MISMATCH",
@@ -118,8 +179,10 @@ export function validatePreparedAction(
     }
   );
 
-  const recovered = ethers.utils.verifyMessage(
-    ethers.utils.arrayify(preparedAction.digest),
+  const recovered = ethers.utils.verifyTypedData(
+    typedDomain,
+    PREPARED_ACTION_EIP712_TYPES,
+    typedPayload,
     preparedAction.signature
   );
 

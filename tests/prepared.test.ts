@@ -1,7 +1,12 @@
 import { ethers } from "ethers";
 import { describe, expect, it } from "vitest";
 
-import { validatePreparedAction } from "../src/prepared.js";
+import {
+  PREPARED_ACTION_EIP712_TYPES,
+  buildPreparedActionSignatureDomain,
+  buildPreparedActionSignaturePayload,
+  validatePreparedAction
+} from "../src/prepared.js";
 import { buildPreparedFixture } from "./helpers/prepared.js";
 import { buildTestRuntime } from "./helpers/runtime.js";
 
@@ -19,6 +24,14 @@ describe("prepared action integrity", () => {
     expect(prepared.signature).toBeTruthy();
     expect(prepared.signatureStatus).toBe("signed");
     expect(prepared.signatureReason).toBeNull();
+    expect(
+      ethers.utils.verifyTypedData(
+        buildPreparedActionSignatureDomain(prepared.chainId),
+        PREPARED_ACTION_EIP712_TYPES,
+        buildPreparedActionSignaturePayload(prepared, prepared.digest),
+        prepared.signature as string
+      )
+    ).toBe(wallet.address);
     expect(() => validatePreparedAction(prepared, runtime)).not.toThrow();
   });
 
@@ -48,6 +61,23 @@ describe("prepared action integrity", () => {
     };
 
     expect(() => validatePreparedAction(tampered, runtime)).toThrow(/digest/i);
+  });
+
+  it("rejects legacy signMessage signatures for prepared payloads", async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const runtime = buildTestRuntime({
+      mode: "execute",
+      signerPrivateKey: wallet.privateKey,
+      executeSignerAddress: wallet.address
+    });
+
+    const prepared = await buildPreparedFixture(wallet, { startingNonce: 3 }, runtime);
+    const legacySigned = {
+      ...prepared,
+      signature: await wallet.signMessage(ethers.utils.arrayify(prepared.digest))
+    };
+
+    expect(() => validatePreparedAction(legacySigned, runtime)).toThrow(/signature/i);
   });
 
   it("marks prepared payloads as unsigned when no matching signer is available", async () => {

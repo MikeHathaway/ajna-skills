@@ -83,6 +83,51 @@ describe("AjnaAdapter safety checks", () => {
     expect(preparedAction.metadata.approvalAmount).toBe("100000000");
   });
 
+  it("uses wall-clock expiry for prepared lend payloads even when chain time is stale", async () => {
+    mockBaseProvider({ timestamp: 1_000_000_000 });
+    mockErc20Pool({
+      quoteTokenScale: BigNumber.from("1000000000000"),
+      collateralScale: BigNumber.from("1")
+    });
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(7);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+    vi.spyOn(adapter as never, "checkAllowance").mockResolvedValue({
+      current: BigNumber.from("100000000"),
+      needed: BigNumber.from("100000000"),
+      approvalTarget: poolAddress
+    });
+    vi.spyOn(adapter as never, "prepareContractTransaction").mockImplementation(
+      async ({ label, methodName, args }) =>
+        ({
+          label,
+          target: poolAddress,
+          value: "0",
+          data: `0x${methodName}`,
+          from: actorAddress,
+          args
+        }) as never
+    );
+
+    const now = Date.now();
+    const preparedAction = await adapter.prepareLend({
+      network: "base",
+      poolAddress,
+      actorAddress,
+      amount: "100000000000000000000",
+      bucketIndex: 3232,
+      ttlSeconds: 60,
+      approvalMode: "exact"
+    });
+    const expiresAtMs = new Date(preparedAction.expiresAt).getTime();
+
+    expect(expiresAtMs).toBeGreaterThanOrEqual(now + 59_000);
+    expect(expiresAtMs).toBeLessThanOrEqual(now + 61_000);
+  });
+
   it("rejects max approval mode for coupled lend preparation", async () => {
     mockBaseProvider();
     mockErc20Pool();
@@ -334,6 +379,63 @@ describe("AjnaAdapter safety checks", () => {
     });
   });
 
+  it("prepares an ERC721 operator revoke when approveForAll is explicitly false", async () => {
+    mockBaseProvider();
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(9);
+    vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      quoteTokenScale: vi.fn().mockResolvedValue(BigNumber.from("1")),
+      collateralScale: vi.fn().mockResolvedValue(BigNumber.from("1"))
+    } as never);
+    vi.spyOn(ERC20PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(ethers.constants.AddressZero)
+    } as never);
+    vi.spyOn(ERC721Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      isSubset: vi.fn().mockResolvedValue(false)
+    } as never);
+    vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const setApprovalForAll = vi.fn().mockResolvedValue(undefined);
+    const token = {
+      isApprovedForAll: vi.fn().mockResolvedValue(true),
+      setApprovalForAll
+    };
+    const adapter = new AjnaAdapter(runtime);
+    const txSpy = vi
+      .spyOn(adapter as never, "prepareContractTransaction")
+      .mockImplementation(async ({ methodName, args }) => ({
+        label: "approval",
+        target: poolAddress,
+        value: "0",
+        data: `0x${methodName}`,
+        from: actorAddress,
+        args
+      }));
+    vi.spyOn(ethers, "Contract").mockImplementation(() => token as never);
+
+    const preparedAction = await adapter.prepareApproveErc721({
+      network: "base",
+      actorAddress,
+      tokenAddress: collateralAddress,
+      poolAddress,
+      approveForAll: false
+    });
+
+    expect(txSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        methodName: "setApprovalForAll",
+        args: [poolAddress, false]
+      })
+    );
+    expect(preparedAction.metadata.approvalScope).toBe("operator");
+    expect(preparedAction.metadata.approveForAll).toBe(false);
+  });
+
   it("still validates ERC721 subset pools when log lookup fails but factory membership is known", async () => {
     mockBaseProvider();
     vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "getTransactionCount").mockResolvedValue(9);
@@ -368,6 +470,38 @@ describe("AjnaAdapter safety checks", () => {
       kind: "erc721-pool",
       poolAddress,
       subsetHash: null
+    });
+  });
+
+  it("falls back to ERC721 pool validation when the ERC20 probe throws a call exception", async () => {
+    mockBaseProvider();
+    vi.spyOn(ERC20Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      quoteTokenScale: vi.fn().mockResolvedValue(BigNumber.from("1")),
+      collateralScale: vi.fn().mockRejectedValue({ code: "CALL_EXCEPTION" })
+    } as never);
+    vi.spyOn(ERC721Pool__factory, "connect").mockReturnValue({
+      quoteTokenAddress: vi.fn().mockResolvedValue(quoteAddress),
+      collateralAddress: vi.fn().mockResolvedValue(collateralAddress),
+      isSubset: vi.fn().mockResolvedValue(false)
+    } as never);
+    vi.spyOn(ERC721PoolFactory__factory, "connect").mockReturnValue({
+      deployedPools: vi.fn().mockResolvedValue(poolAddress)
+    } as never);
+
+    const adapter = new AjnaAdapter(runtime);
+
+    await expect(
+      (adapter as never).loadAjnaPoolTargetContext(
+        poolAddress,
+        runtime.networks.base,
+        new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545", 8453)
+      )
+    ).resolves.toMatchObject({
+      kind: "erc721-pool",
+      poolAddress,
+      subsetHash: "0x93e3b87db48beb11f82ff978661ba6e96f72f582300e9724191ab4b5d7964364"
     });
   });
 

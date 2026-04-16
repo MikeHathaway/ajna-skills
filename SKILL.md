@@ -80,7 +80,8 @@ export AJNA_ENABLE_UNSAFE_SDK_CALLS="1"
 1. Inspect first with `inspect-pool`, `inspect-bucket`, or `inspect-position`.
 2. Prepare exactly one action and review the normalized prepared payload.
    Check `signatureStatus` and `signatureReason`; unsigned payloads are dry-runs,
-   not execution-ready artifacts.
+   not execution-ready artifacts. Signed payloads use EIP-712 typed-data
+   signatures scoped to the Ajna Skills domain and target chain.
 3. Execute only from `execute-prepared`.
 4. Verify the result with a follow-up inspect call or allowance/position check.
 
@@ -91,6 +92,8 @@ Preferred examples:
 - Existing borrower: `inspect-position` before modifying debt or collateral.
 - New pool creation: execute, capture `resolvedPoolAddress`, then inspect the
   created pool before doing anything else with it.
+  For ERC721 subset pools, use `resolvedPoolAddress`; token-pair discovery does
+  not find subset pools.
 
 ## Commands
 
@@ -110,11 +113,17 @@ Ask for fuller state when you need rates, debt, or reserve-auction state:
 node dist/cli.js inspect-pool '{"network":"base","poolAddress":"0x...","detailLevel":"full"}'
 ```
 
+Inspection results include `poolKind`, and ERC721 pools include `subsetHash`
+when available.
+
 Inspect one bucket:
 
 ```bash
 node dist/cli.js inspect-bucket '{"network":"base","poolAddress":"0x...","bucketIndex":3232}'
 ```
+
+`collateralDust` is only populated for ERC20 pools. ERC721 pool bucket results
+return `null` for that field.
 
 Inspect a borrower or lender position:
 
@@ -124,6 +133,7 @@ node dist/cli.js inspect-position '{"network":"base","poolAddress":"0x...","owne
 
 For lender positions, also include `bucketIndex` and set
 `"positionType":"lender"`.
+ERC721 borrower inspections also include `collateralTokenIds`.
 
 ### Supported write preparation
 
@@ -185,14 +195,23 @@ Prepare ERC721 approval:
 node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","tokenId":"123"}'
 ```
 
-Or operator approval for all NFTs on that collection:
+Or operator approval grant for all NFTs on that collection:
 
 ```bash
 node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","approveForAll":true}'
 ```
 
+Or operator approval revoke for all NFTs on that collection:
+
+```bash
+node dist/cli.js prepare-approve-erc721 '{"network":"base","poolAddress":"0x...","tokenAddress":"0x...","actorAddress":"0x...","approveForAll":false}'
+```
+
 `poolAddress` must be a real Ajna pool on the selected network.
 `tokenAddress` must match the pool's collateral NFT collection.
+If `approveForAll` is present, it requests the whole-collection operator target
+state; otherwise the command requires `tokenId` and prepares a single-token
+approval.
 If the requested approval is already satisfied, prepare fails instead of
 returning an empty payload.
 For fork tests, use a dedicated `AJNA_TEST_ERC721_POOL_ADDRESS` fixture when the

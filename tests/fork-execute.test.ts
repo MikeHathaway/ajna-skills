@@ -148,6 +148,7 @@ describe("fork-backed execute flow", () => {
       const signerAddress = await signer.getAddress();
       const pool = ERC20Pool__factory.connect(poolAddress, provider);
       const quoteTokenAddress = await pool.quoteTokenAddress();
+      const quoteToken = ERC20__factory.connect(quoteTokenAddress, provider);
 
       process.env.AJNA_SKILLS_MODE = "execute";
       process.env.AJNA_SIGNER_PRIVATE_KEY = signerPrivateKey;
@@ -159,6 +160,7 @@ describe("fork-backed execute flow", () => {
         recipientAddress: signerAddress,
         amountRaw: fundAmountRaw
       });
+      const preLendQuoteBalance = await quoteToken.balanceOf(signerAddress);
 
       const preparedAction = await runPrepareLend({
         network: "base",
@@ -179,6 +181,10 @@ describe("fork-backed execute flow", () => {
       });
 
       expect(result.submitted.length).toBe(preparedAction.transactions.length);
+      const lenderInfo = await pool.lenderInfo(bucketIndex, signerAddress);
+      const [lpBalance] = lenderInfo;
+      expect(lpBalance.gt(0)).toBe(true);
+      expect((await quoteToken.balanceOf(signerAddress)).lt(preLendQuoteBalance)).toBe(true);
 
       await expect(
         runExecutePrepared({
@@ -210,6 +216,8 @@ describe("fork-backed execute flow", () => {
       const signerAddress = await signer.getAddress();
       const pool = ERC20Pool__factory.connect(poolAddress, provider);
       const collateralTokenAddress = await pool.collateralAddress();
+      const quoteTokenAddress = await pool.quoteTokenAddress();
+      const quoteToken = ERC20__factory.connect(quoteTokenAddress, provider);
 
       process.env.AJNA_SKILLS_MODE = "execute";
       process.env.AJNA_SIGNER_PRIVATE_KEY = signerPrivateKey;
@@ -221,6 +229,7 @@ describe("fork-backed execute flow", () => {
         recipientAddress: signerAddress,
         amountRaw: collateralFundAmountRaw
       });
+      const preBorrowQuoteBalance = await quoteToken.balanceOf(signerAddress);
 
       const preparedAction = await runPrepareBorrow({
         network: "base",
@@ -241,6 +250,10 @@ describe("fork-backed execute flow", () => {
       });
 
       expect(result.submitted.length).toBe(preparedAction.transactions.length);
+      const borrowerInfo = await pool.borrowerInfo(signerAddress);
+      expect(borrowerInfo[0].gt(0)).toBe(true);
+      expect(borrowerInfo[1].gte(ethers.BigNumber.from(collateralAmountWad))).toBe(true);
+      expect((await quoteToken.balanceOf(signerAddress)).gt(preBorrowQuoteBalance)).toBe(true);
 
       await expect(
         runExecutePrepared({

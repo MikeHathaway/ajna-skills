@@ -8,6 +8,7 @@ import {
   ERC20__factory,
   PoolInfoUtils__factory,
   PositionManager__factory,
+  SdkError,
   createTransaction
 } from "@ajna-finance/sdk";
 import { BigNumber, ethers } from "ethers";
@@ -59,6 +60,22 @@ type AjnaPoolTargetContext =
       quoteAddress: string;
       collateralAddress: string;
       subsetHash: string | null;
+    };
+type DeferredVerificationPolicy =
+  | {
+      kind: "erc20-allowance-raise";
+      tokenAddress: string;
+      owner: string;
+      spender: string;
+      requiredAllowance: BigNumber;
+    }
+  | {
+      kind: "erc20-allowance-reset";
+      tokenAddress: string;
+      owner: string;
+      spender: string;
+      currentAllowance: BigNumber;
+      desiredAllowance: BigNumber;
     };
 
 const ERC721_APPROVAL_ABI = [
@@ -132,6 +149,16 @@ const UNSAFE_ALLOWED_METHODS: Record<UnsupportedAjnaContractKind, Set<string>> =
 };
 const ERC20_SYMBOL_STRING_IFACE = new ethers.utils.Interface(["function symbol() view returns (string)"]);
 const ERC20_SYMBOL_BYTES32_IFACE = new ethers.utils.Interface(["function symbol() view returns (bytes32)"]);
+const ALLOWANCE_RAISE_SDK_REASONS = new Set([
+  "ERC20InsufficientAllowance",
+  "transfer amount exceeds allowance",
+  "insufficient approval"
+]);
+const ALLOWANCE_RESET_SDK_REASONS = new Set([
+  "approve from non-zero to non-zero allowance",
+  "must reset allowance to zero",
+  "allowance must be zero before setting"
+]);
 
 export class AjnaAdapter {
   constructor(private readonly runtime: RuntimeConfig) {}
@@ -140,26 +167,27 @@ export class AjnaAdapter {
     const detailLevel = input.detailLevel ?? "basic";
     const network = this.network(input.network);
     const provider = await this.provider(network);
-    const poolAddress = await this.resolvePoolAddress(input, network, provider);
-    const pool = ERC20Pool__factory.connect(poolAddress, provider);
+    const poolTarget = await this.resolveInspectablePoolContext(input, network, provider);
     const poolInfoUtils = PoolInfoUtils__factory.connect(network.poolInfoUtils, provider);
 
     const [collateralAddress, quoteAddress, prices, loans, utilization, reserves, borrowFeeRate, depositFeeRate] =
       await Promise.all([
-        pool.collateralAddress(),
-        pool.quoteTokenAddress(),
-        poolInfoUtils.poolPricesInfo(poolAddress),
-        poolInfoUtils.poolLoansInfo(poolAddress),
-        poolInfoUtils.poolUtilizationInfo(poolAddress),
-        poolInfoUtils.poolReservesInfo(poolAddress),
-        poolInfoUtils.borrowFeeRate(poolAddress),
-        poolInfoUtils.depositFeeRate(poolAddress)
+        Promise.resolve(poolTarget.collateralAddress),
+        Promise.resolve(poolTarget.quoteAddress),
+        poolInfoUtils.poolPricesInfo(poolTarget.poolAddress),
+        poolInfoUtils.poolLoansInfo(poolTarget.poolAddress),
+        poolInfoUtils.poolUtilizationInfo(poolTarget.poolAddress),
+        poolInfoUtils.poolReservesInfo(poolTarget.poolAddress),
+        poolInfoUtils.borrowFeeRate(poolTarget.poolAddress),
+        poolInfoUtils.depositFeeRate(poolTarget.poolAddress)
       ]);
 
     const baseResult: PoolInspectionResult = {
       network: input.network,
       detailLevel,
-      poolAddress,
+      poolKind: poolTarget.kind,
+      poolAddress: poolTarget.poolAddress,
+      subsetHash: this.poolTargetSubsetHash(poolTarget),
       collateralAddress,
       collateralSymbol: await this.readSymbol(collateralAddress, provider),
       quoteAddress,
@@ -191,15 +219,63 @@ export class AjnaAdapter {
       return baseResult;
     }
 
-    const [debtInfo, interestRateInfo, pledgedCollateral, poolType, quoteTokenScale, collateralScale, lenderMargin] =
-      await Promise.all([
+    if (poolTarget.kind === "erc20-pool") {
+      const pool = ERC20Pool__factory.connect(poolTarget.poolAddress, provider);
+      const [
+        debtInfo,
+        interestRateInfo,
+        pledgedCollateral,
+        poolType,
+        quoteTokenScale,
+        collateralScale,
+        lenderMargin
+      ] = await Promise.all([
         pool.debtInfo(),
         pool.interestRateInfo(),
         pool.pledgedCollateral(),
         pool.poolType(),
         pool.quoteTokenScale(),
         pool.collateralScale(),
-        poolInfoUtils.lenderInterestMargin(poolAddress)
+        poolInfoUtils.lenderInterestMargin(poolTarget.poolAddress)
+      ]);
+
+      return {
+        ...baseResult,
+        full: {
+          config: {
+            poolType,
+            quoteTokenScale: quoteTokenScale.toString(),
+            collateralScale: collateralScale.toString()
+          },
+          rates: {
+            borrowRate: interestRateInfo[0].toString(),
+            lenderInterestMargin: lenderMargin.toString(),
+            interestRateLastUpdated: new Date(interestRateInfo[1].toNumber() * 1000).toISOString()
+          },
+          debt: {
+            debt: debtInfo[0].toString(),
+            poolDebtInAuction: debtInfo[2].toString(),
+            pendingInflator: loans.pendingInflator_.toString(),
+            pendingInterestFactor: loans.pendingInterestFactor_.toString()
+          },
+          totals: {
+            pledgedCollateral: pledgedCollateral.toString(),
+            reserveAuctionPrice: reserves.auctionPrice_.toString(),
+            reserveAuctionTimeRemaining: reserves.timeRemaining_.toString()
+          }
+        }
+      };
+    }
+
+    const pool = ERC721Pool__factory.connect(poolTarget.poolAddress, provider);
+    const [debtInfo, interestRateInfo, pledgedCollateral, poolType, quoteTokenScale, lenderMargin] =
+      await Promise.all([
+        pool.debtInfo(),
+        pool.interestRateInfo(),
+        pool.pledgedCollateral(),
+        pool.poolType(),
+        pool.quoteTokenScale(),
+        poolInfoUtils.lenderInterestMargin(poolTarget.poolAddress)
       ]);
 
     return {
@@ -208,7 +284,7 @@ export class AjnaAdapter {
         config: {
           poolType,
           quoteTokenScale: quoteTokenScale.toString(),
-          collateralScale: collateralScale.toString()
+          collateralScale: null
         },
         rates: {
           borrowRate: interestRateInfo[0].toString(),
@@ -233,17 +309,19 @@ export class AjnaAdapter {
   async inspectBucket(input: InspectBucketInput): Promise<BucketInspectionResult> {
     const network = this.network(input.network);
     const provider = await this.provider(network);
-    const poolAddress = await this.resolvePoolAddress(input, network, provider);
-    const pool = ERC20Pool__factory.connect(poolAddress, provider);
+    const poolTarget = await this.resolveInspectablePoolContext(input, network, provider);
     const poolInfoUtils = PoolInfoUtils__factory.connect(network.poolInfoUtils, provider);
-    const [bucketInfo, collateralDust] = await Promise.all([
-      poolInfoUtils.bucketInfo(poolAddress, input.bucketIndex),
-      pool.bucketCollateralDust(input.bucketIndex)
-    ]);
+    const bucketInfo = await poolInfoUtils.bucketInfo(poolTarget.poolAddress, input.bucketIndex);
+    const collateralDust =
+      poolTarget.kind === "erc20-pool"
+        ? await ERC20Pool__factory.connect(poolTarget.poolAddress, provider).bucketCollateralDust(input.bucketIndex)
+        : null;
 
     return {
       network: input.network,
-      poolAddress,
+      poolKind: poolTarget.kind,
+      poolAddress: poolTarget.poolAddress,
+      subsetHash: this.poolTargetSubsetHash(poolTarget),
       bucketIndex: input.bucketIndex,
       bucket: {
         price: bucketInfo.price_.toString(),
@@ -252,7 +330,7 @@ export class AjnaAdapter {
         bucketLP: bucketInfo.bucketLP_.toString(),
         scale: bucketInfo.scale_.toString(),
         exchangeRate: bucketInfo.exchangeRate_.toString(),
-        collateralDust: collateralDust.toString()
+        collateralDust: collateralDust?.toString() ?? null
       }
     };
   }
@@ -260,26 +338,53 @@ export class AjnaAdapter {
   async inspectPosition(input: InspectPositionInput): Promise<Record<string, unknown>> {
     const network = this.network(input.network);
     const provider = await this.provider(network);
-    const poolAddress = await this.resolvePoolAddress(input, network, provider);
+    const poolTarget = await this.resolveInspectablePoolContext(input, network, provider);
     const owner = ethers.utils.getAddress(input.owner);
-    const pool = ERC20Pool__factory.connect(poolAddress, provider);
     const poolInfoUtils = PoolInfoUtils__factory.connect(network.poolInfoUtils, provider);
 
     if (input.positionType === "borrower") {
-      const [borrowerInfo, debtInfo] = await Promise.all([
-        poolInfoUtils.borrowerInfo(poolAddress, owner),
-        pool.debtInfo()
+      const borrowerInfoPromise = poolInfoUtils.borrowerInfo(poolTarget.poolAddress, owner);
+
+      if (poolTarget.kind === "erc20-pool") {
+        const pool = ERC20Pool__factory.connect(poolTarget.poolAddress, provider);
+        const [borrowerInfo, debtInfo] = await Promise.all([borrowerInfoPromise, pool.debtInfo()]);
+        const debtInAuction = debtInfo[2];
+
+        return {
+          poolKind: poolTarget.kind,
+          poolAddress: poolTarget.poolAddress,
+          subsetHash: this.poolTargetSubsetHash(poolTarget),
+          positionType: "borrower",
+          owner,
+          debt: borrowerInfo.debt_.toString(),
+          collateral: borrowerInfo.collateral_.toString(),
+          thresholdPrice: borrowerInfo.thresholdPrice_.toString(),
+          neutralPrice: borrowerInfo.t0Np_.toString(),
+          poolDebtInAuction: debtInAuction.toString(),
+          collateralTokenIds: null
+        };
+      }
+
+      const pool = ERC721Pool__factory.connect(poolTarget.poolAddress, provider);
+      const [borrowerInfo, debtInfo, borrowerTokenIds] = await Promise.all([
+        borrowerInfoPromise,
+        pool.debtInfo(),
+        pool.getBorrowerTokenIds(owner)
       ]);
       const debtInAuction = debtInfo[2];
 
       return {
+        poolKind: poolTarget.kind,
+        poolAddress: poolTarget.poolAddress,
+        subsetHash: this.poolTargetSubsetHash(poolTarget),
         positionType: "borrower",
         owner,
         debt: borrowerInfo.debt_.toString(),
         collateral: borrowerInfo.collateral_.toString(),
         thresholdPrice: borrowerInfo.thresholdPrice_.toString(),
         neutralPrice: borrowerInfo.t0Np_.toString(),
-        poolDebtInAuction: debtInAuction.toString()
+        poolDebtInAuction: debtInAuction.toString(),
+        collateralTokenIds: borrowerTokenIds.map((tokenId: BigNumber) => BigNumber.from(tokenId).toString())
       };
     }
 
@@ -289,14 +394,21 @@ export class AjnaAdapter {
       "Lender position inspection requires bucketIndex"
     );
 
+    const pool =
+      poolTarget.kind === "erc20-pool"
+        ? ERC20Pool__factory.connect(poolTarget.poolAddress, provider)
+        : ERC721Pool__factory.connect(poolTarget.poolAddress, provider);
     const lenderInfo = await pool.lenderInfo(input.bucketIndex, owner);
     const [lpBalance, depositTime] = lenderInfo;
     const [quoteRedeemable, collateralRedeemable] = await Promise.all([
-      poolInfoUtils.lpToQuoteTokens(poolAddress, lpBalance, input.bucketIndex),
-      poolInfoUtils.lpToCollateral(poolAddress, lpBalance, input.bucketIndex)
+      poolInfoUtils.lpToQuoteTokens(poolTarget.poolAddress, lpBalance, input.bucketIndex),
+      poolInfoUtils.lpToCollateral(poolTarget.poolAddress, lpBalance, input.bucketIndex)
     ]);
 
     return {
+      poolKind: poolTarget.kind,
+      poolAddress: poolTarget.poolAddress,
+      subsetHash: this.poolTargetSubsetHash(poolTarget),
       positionType: "lender",
       owner,
       bucketIndex: input.bucketIndex,
@@ -509,13 +621,23 @@ export class AjnaAdapter {
       );
     }
 
+    const expiresAt = await this.expirationIso(provider, input.ttlSeconds);
     const lendTx = await this.prepareContractTransaction({
       contract: ERC20Pool__factory.connect(poolContext.poolAddress, provider),
       methodName: "addQuoteToken",
       args: [amount, input.bucketIndex, expiry],
       from: actorAddress,
       label: "action",
-      allowVerifyFailure: transactions.length > 0
+      deferredVerification:
+        transactions.length > 0
+          ? {
+              kind: "erc20-allowance-raise",
+              tokenAddress: poolContext.quoteAddress,
+              owner: actorAddress,
+              spender: poolContext.poolAddress,
+              requiredAllowance: approval.needed
+            }
+          : undefined
     });
     transactions.push(lendTx);
 
@@ -531,7 +653,7 @@ export class AjnaAdapter {
         quoteAddress: poolContext.quoteAddress,
         collateralAddress: poolContext.collateralAddress,
         createdAt: new Date().toISOString(),
-        expiresAt: new Date(expiry * 1000).toISOString(),
+        expiresAt,
         transactions,
         metadata: {
           amount: amount.toString(),
@@ -600,7 +722,16 @@ export class AjnaAdapter {
       args: [actorAddress, amount, input.limitIndex, collateralAmount],
       from: actorAddress,
       label: "action",
-      allowVerifyFailure: transactions.length > 0
+      deferredVerification:
+        transactions.length > 0
+          ? {
+              kind: "erc20-allowance-raise",
+              tokenAddress: poolContext.collateralAddress,
+              owner: actorAddress,
+              spender: poolContext.poolAddress,
+              requiredAllowance: approval.needed
+            }
+          : undefined
     });
     transactions.push(borrowTx);
 
@@ -705,6 +836,7 @@ export class AjnaAdapter {
     const approvalTarget = poolTarget.poolAddress;
     const tokenAddress = ethers.utils.getAddress(input.tokenAddress);
     this.assertApproveErc721TokenMatchesPool(tokenAddress, poolTarget);
+    const hasOperatorApprovalPreference = input.approveForAll !== undefined;
     const approveForAll = input.approveForAll ?? false;
     const startingNonce = await provider.getTransactionCount(actorAddress, "pending");
     const token = new ethers.Contract(tokenAddress, ERC721_APPROVAL_ABI, provider);
@@ -713,14 +845,14 @@ export class AjnaAdapter {
     let alreadyApproved = false;
     let tokenIdMetadata: string | null = null;
 
-    if (approveForAll) {
-      alreadyApproved = await token.isApprovedForAll(actorAddress, approvalTarget);
+    if (hasOperatorApprovalPreference) {
+      alreadyApproved = (await token.isApprovedForAll(actorAddress, approvalTarget)) === approveForAll;
 
       if (!alreadyApproved) {
         const approveTx = await this.prepareContractTransaction({
           contract: token,
           methodName: "setApprovalForAll",
-          args: [approvalTarget, true],
+          args: [approvalTarget, approveForAll],
           from: actorAddress,
           label: "approval"
         });
@@ -730,18 +862,20 @@ export class AjnaAdapter {
       invariant(
         transactions.length > 0,
         "APPROVAL_ALREADY_SATISFIED",
-        "Requested ERC721 operator approval already matches the requested target state",
+        approveForAll
+          ? "Requested ERC721 operator approval already matches the requested target state"
+          : "Requested ERC721 operator revoke already matches the requested target state",
         {
           tokenAddress,
           approvalTarget,
-          approveForAll: true
+          approveForAll
         }
       );
     } else {
       invariant(
         input.tokenId !== undefined,
         "MISSING_TOKEN_ID",
-        "ERC721 approval requires tokenId unless approveForAll is true"
+        "ERC721 approval requires tokenId unless approveForAll is explicitly set"
       );
 
       const tokenId = BigNumber.from(input.tokenId);
@@ -768,14 +902,16 @@ export class AjnaAdapter {
     invariant(
       transactions.length > 0,
       "APPROVAL_ALREADY_SATISFIED",
-      approveForAll
-        ? "Requested ERC721 operator approval already matches the requested target state"
+      hasOperatorApprovalPreference
+        ? approveForAll
+          ? "Requested ERC721 operator approval already matches the requested target state"
+          : "Requested ERC721 operator revoke already matches the requested target state"
         : "Requested ERC721 approval already matches the requested target state",
-      approveForAll
+      hasOperatorApprovalPreference
         ? {
             tokenAddress,
             approvalTarget,
-            approveForAll: true
+            approveForAll
           }
         : {
             tokenAddress,
@@ -803,7 +939,8 @@ export class AjnaAdapter {
           tokenAddress,
           approvalTarget,
           tokenId: tokenIdMetadata,
-          approveForAll,
+          approveForAll: hasOperatorApprovalPreference ? approveForAll : null,
+          approvalScope: hasOperatorApprovalPreference ? "operator" : "token",
           alreadyApproved
         }
       },
@@ -915,6 +1052,61 @@ export class AjnaAdapter {
     return poolAddress;
   }
 
+  private async resolveInspectablePoolContext(
+    selector: InspectPoolInput | InspectBucketInput | InspectPositionInput,
+    network: RuntimeNetworkConfig,
+    provider: ethers.providers.JsonRpcProvider
+  ): Promise<AjnaPoolTargetContext> {
+    if (selector.poolAddress) {
+      return this.loadAjnaPoolTargetContext(selector.poolAddress, network, provider);
+    }
+
+    invariant(
+      selector.collateralAddress && selector.quoteAddress,
+      "MISSING_POOL_SELECTOR",
+      "Provide either poolAddress or collateralAddress + quoteAddress"
+    );
+
+    const collateralAddress = ethers.utils.getAddress(selector.collateralAddress);
+    const quoteAddress = ethers.utils.getAddress(selector.quoteAddress);
+    const erc20Factory = ERC20PoolFactory__factory.connect(network.erc20PoolFactory, provider);
+    const erc20PoolAddress = await this.lookupDeployedPool(
+      erc20Factory,
+      ERC20_NON_SUBSET_HASH,
+      collateralAddress,
+      quoteAddress
+    );
+
+    if (erc20PoolAddress !== ethers.constants.AddressZero) {
+      return this.loadAjnaErc20PoolContext(erc20PoolAddress, network, provider);
+    }
+
+    const erc721Factory = ERC721PoolFactory__factory.connect(network.erc721PoolFactory, provider);
+    const erc721PoolAddress = await this.lookupDeployedPool(
+      erc721Factory,
+      ERC721_NON_SUBSET_HASH,
+      collateralAddress,
+      quoteAddress
+    );
+
+    if (erc721PoolAddress !== ethers.constants.AddressZero) {
+      return this.loadAjnaErc721PoolContext(erc721PoolAddress, network, provider);
+    }
+
+    throw new AjnaSkillError(
+      "POOL_NOT_FOUND",
+      "No Ajna ERC20 or ERC721 collection pool found for the provided token pair",
+      {
+        collateralAddress,
+        quoteAddress
+      }
+    );
+  }
+
+  private poolTargetSubsetHash(poolTarget: AjnaPoolTargetContext): string | null {
+    return poolTarget.kind === "erc721-pool" ? poolTarget.subsetHash : null;
+  }
+
   private async readSymbol(
     tokenAddress: string,
     provider: ethers.providers.Provider
@@ -966,11 +1158,10 @@ export class AjnaAdapter {
   }
 
   private async expirationIso(
-    provider: ethers.providers.Provider,
+    _provider: ethers.providers.Provider,
     maxAgeSeconds: number = DEFAULT_PREPARED_MAX_AGE_SECONDS
   ): Promise<string> {
-    const latestTimestamp = await this.latestTimestamp(provider);
-    return new Date((latestTimestamp + maxAgeSeconds) * 1000).toISOString();
+    return new Date(Date.now() + maxAgeSeconds * 1000).toISOString();
   }
 
   private async assertContractHasCode(
@@ -1114,7 +1305,16 @@ export class AjnaAdapter {
         args: [approvalTarget, desiredAllowance],
         from: actorAddress,
         label: "approval",
-        allowVerifyFailure: requiresReset
+        deferredVerification: requiresReset
+          ? {
+              kind: "erc20-allowance-reset",
+              tokenAddress,
+              owner: actorAddress,
+              spender: approvalTarget,
+              currentAllowance,
+              desiredAllowance
+            }
+          : undefined
       })
     );
 
@@ -1332,7 +1532,7 @@ export class AjnaAdapter {
     try {
       return await this.loadAjnaErc20PoolContext(poolAddress, network, provider);
     } catch (error) {
-      if (!(error instanceof AjnaSkillError) || error.code !== "INVALID_AJNA_POOL") {
+      if (!this.shouldFallbackPoolTypeProbe(error)) {
         throw error;
       }
       // fall through to ERC721 validation
@@ -1341,7 +1541,7 @@ export class AjnaAdapter {
     try {
       return await this.loadAjnaErc721PoolContext(poolAddress, network, provider);
     } catch (error) {
-      if (!(error instanceof AjnaSkillError) || error.code !== "INVALID_AJNA_POOL") {
+      if (!this.shouldFallbackPoolTypeProbe(error)) {
         throw error;
       }
       // fall through to the explicit error below
@@ -1354,6 +1554,19 @@ export class AjnaAdapter {
         poolAddress
       }
     );
+  }
+
+  private shouldFallbackPoolTypeProbe(error: unknown): boolean {
+    if (error instanceof AjnaSkillError) {
+      return error.code === "INVALID_AJNA_POOL";
+    }
+
+    if (typeof error === "object" && error !== null && "code" in error) {
+      const code = String((error as { code?: unknown }).code ?? "");
+      return code === "CALL_EXCEPTION" || code === "BAD_DATA";
+    }
+
+    return false;
   }
 
   private async findErc721SubsetHashForPool(
@@ -1559,7 +1772,7 @@ export class AjnaAdapter {
     from,
     label,
     value,
-    allowVerifyFailure = false
+    deferredVerification
   }: {
     contract: ethers.Contract;
     methodName: string;
@@ -1567,7 +1780,7 @@ export class AjnaAdapter {
     from: string;
     label: "approval" | "action";
     value?: string;
-    allowVerifyFailure?: boolean;
+    deferredVerification?: DeferredVerificationPolicy;
   }) {
     const wrapped = (await createTransaction(
       contract,
@@ -1589,7 +1802,8 @@ export class AjnaAdapter {
     try {
       gasEstimate = await wrapped.verify();
     } catch (error) {
-      if (!allowVerifyFailure) {
+      const canDefer = await this.canDeferVerification(error, contract.provider, deferredVerification);
+      if (!canDefer) {
         throw new AjnaSkillError(
           "PREPARE_VERIFICATION_FAILED",
           "Prepared transaction failed verification before it was signed",
@@ -1615,6 +1829,55 @@ export class AjnaAdapter {
             : BigNumber.from(tx.nonce).toNumber(),
       gasEstimate: gasEstimate?.toString()
     };
+  }
+
+  private async canDeferVerification(
+    error: unknown,
+    provider: ethers.providers.Provider | undefined,
+    deferredVerification?: DeferredVerificationPolicy
+  ): Promise<boolean> {
+    if (!deferredVerification || !provider) {
+      return false;
+    }
+
+    switch (deferredVerification.kind) {
+      case "erc20-allowance-raise": {
+        if (!this.isKnownAllowanceRaiseVerificationFailure(error)) {
+          return false;
+        }
+
+        const allowance = await ERC20__factory
+          .connect(deferredVerification.tokenAddress, provider)
+          .allowance(deferredVerification.owner, deferredVerification.spender);
+        return allowance.lt(deferredVerification.requiredAllowance);
+      }
+      case "erc20-allowance-reset": {
+        if (!this.isKnownAllowanceResetVerificationFailure(error)) {
+          return false;
+        }
+
+        const allowance = await ERC20__factory
+          .connect(deferredVerification.tokenAddress, provider)
+          .allowance(deferredVerification.owner, deferredVerification.spender);
+        return (
+          deferredVerification.currentAllowance.gt(0) &&
+          deferredVerification.desiredAllowance.gt(0) &&
+          allowance.eq(deferredVerification.currentAllowance)
+        );
+      }
+    }
+  }
+
+  private isKnownAllowanceRaiseVerificationFailure(error: unknown): boolean {
+    return this.matchesKnownSdkReason(error, ALLOWANCE_RAISE_SDK_REASONS);
+  }
+
+  private isKnownAllowanceResetVerificationFailure(error: unknown): boolean {
+    return this.matchesKnownSdkReason(error, ALLOWANCE_RESET_SDK_REASONS);
+  }
+
+  private matchesKnownSdkReason(error: unknown, expectedReasons: Set<string>): boolean {
+    return error instanceof SdkError && expectedReasons.has(error.message);
   }
 
   private async resolveUnsupportedContractAddress(

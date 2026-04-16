@@ -126,6 +126,16 @@ export async function runExecutePrepared(
       expected: [`AJNA_RPC_URL_${input.preparedAction.network.toUpperCase()}`, "AJNA_RPC_URL"]
     }
   );
+  invariant(
+    input.preparedAction.chainId === network.chainId,
+    "PREPARED_CHAIN_MISMATCH",
+    "Prepared action chainId does not match the selected runtime network",
+    {
+      network: input.preparedAction.network,
+      preparedChainId: input.preparedAction.chainId,
+      runtimeChainId: network.chainId
+    }
+  );
   const provider = await buildNetworkProvider(network);
   const signer = new ethers.Wallet(runtime.signerPrivateKey, provider);
   const signerAddress = await signer.getAddress();
@@ -151,69 +161,84 @@ export async function runExecutePrepared(
   const submitted: ExecutePreparedResult["submitted"] = [];
   const blockGasLimit = await readLatestBlockGasLimit(provider);
 
-  for (const [index, tx] of input.preparedAction.transactions.entries()) {
-    const expectedNonce = input.preparedAction.startingNonce + index;
-    invariant(
-      tx.nonce === undefined || tx.nonce === expectedNonce,
-      "PREPARED_TRANSACTION_NONCE_MISMATCH",
-      "Prepared transaction nonce does not match expected execution sequence",
-      {
-        label: tx.label,
-        preparedNonce: tx.nonce,
-        expectedNonce
+  try {
+    for (const [index, tx] of input.preparedAction.transactions.entries()) {
+      const expectedNonce = input.preparedAction.startingNonce + index;
+      invariant(
+        tx.nonce === undefined || tx.nonce === expectedNonce,
+        "PREPARED_TRANSACTION_NONCE_MISMATCH",
+        "Prepared transaction nonce does not match expected execution sequence",
+        {
+          label: tx.label,
+          preparedNonce: tx.nonce,
+          expectedNonce
+        }
+      );
+
+      const estimateInput: ethers.providers.TransactionRequest = {
+        to: tx.target,
+        data: tx.data,
+        value: ethers.BigNumber.from(tx.value),
+        from: signerAddress,
+        nonce: expectedNonce
+      };
+
+      let gasEstimate: ethers.BigNumber;
+
+      try {
+        gasEstimate = await provider.estimateGas(estimateInput);
+      } catch (error) {
+        throw new AjnaSkillError(
+          "EXECUTE_VERIFICATION_FAILED",
+          "Prepared transaction failed verification before submit",
+          {
+            label: tx.label,
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        );
       }
-    );
 
-    const estimateInput: ethers.providers.TransactionRequest = {
-      to: tx.target,
-      data: tx.data,
-      value: ethers.BigNumber.from(tx.value),
-      from: signerAddress,
-      nonce: expectedNonce
-    };
-
-    let gasEstimate: ethers.BigNumber;
-
-    try {
-      gasEstimate = await provider.estimateGas(estimateInput);
-    } catch (error) {
-      throw new AjnaSkillError("EXECUTE_VERIFICATION_FAILED", "Prepared transaction failed verification before submit", {
-        label: tx.label,
-        reason: error instanceof Error ? error.message : String(error)
+      const response = await signer.sendTransaction({
+        ...estimateInput,
+        gasLimit: computeExecutionGasLimit(gasEstimate, blockGasLimit)
       });
-    }
-
-    const response = await signer.sendTransaction({
-      ...estimateInput,
-      gasLimit: computeExecutionGasLimit(gasEstimate, blockGasLimit)
-    });
-    const receipt = await response.wait(confirmations);
-    invariant(
-      receipt.status !== undefined,
-      "EXECUTE_RECEIPT_STATUS_UNKNOWN",
-      "Prepared transaction receipt did not include a success status; verify onchain state manually",
-      {
-        label: tx.label,
-        hash: response.hash
-      }
-    );
-    invariant(
-      receipt.status === 1,
-      "EXECUTE_TRANSACTION_REVERTED",
-      "Prepared transaction reverted after it was submitted",
-      {
+      const receipt = await response.wait(confirmations);
+      const submittedEntry = {
         label: tx.label,
         hash: response.hash,
-        status: receipt.status ?? null
-      }
-    );
+        status: receipt.status ?? null,
+        gasUsed: receipt.gasUsed.toString()
+      };
 
-    submitted.push({
-      label: tx.label,
-      hash: response.hash,
-      status: receipt.status,
-      gasUsed: receipt.gasUsed.toString()
-    });
+      invariant(
+        receipt.status !== undefined,
+        "EXECUTE_RECEIPT_STATUS_UNKNOWN",
+        "Prepared transaction receipt did not include a success status; verify onchain state manually",
+        {
+          label: tx.label,
+          hash: response.hash,
+          submittedSoFar: [...submitted, submittedEntry]
+        }
+      );
+      invariant(
+        receipt.status === 1,
+        "EXECUTE_TRANSACTION_REVERTED",
+        "Prepared transaction reverted after it was submitted",
+        {
+          label: tx.label,
+          hash: response.hash,
+          status: receipt.status,
+          submittedSoFar: [...submitted, submittedEntry]
+        }
+      );
+
+      submitted.push({
+        ...submittedEntry,
+        status: receipt.status
+      });
+    }
+  } catch (error) {
+    throw withSubmittedContext(error, submitted);
   }
 
   const resolvedPoolAddress = await resolveCreatedPoolAddress(provider, network, input.preparedAction);
@@ -255,4 +280,28 @@ function computeExecutionGasLimit(
   }
 
   return padded.gt(ceiling) ? ceiling : padded;
+}
+
+function withSubmittedContext(
+  error: unknown,
+  submitted: ExecutePreparedResult["submitted"]
+): unknown {
+  if (submitted.length === 0) {
+    return error;
+  }
+
+  if (error instanceof AjnaSkillError) {
+    if (error.details?.submittedSoFar) {
+      return error;
+    }
+
+    return new AjnaSkillError(error.code, error.message, {
+      ...error.details,
+      submittedSoFar: submitted
+    });
+  }
+
+  return new AjnaSkillError("EXECUTE_FAILED", "Prepared transaction execution failed", {
+    submittedSoFar: submitted
+  });
 }

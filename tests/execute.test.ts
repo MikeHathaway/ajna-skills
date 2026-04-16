@@ -29,6 +29,22 @@ describe("runExecutePrepared", () => {
     });
   });
 
+  it("rejects execute when the prepared chainId does not match the selected runtime network", async () => {
+    const wallet = ethers.Wallet.createRandom();
+
+    process.env.AJNA_SKILLS_MODE = "execute";
+    process.env.AJNA_SIGNER_PRIVATE_KEY = wallet.privateKey;
+    process.env.AJNA_RPC_URL_BASE = "http://127.0.0.1:8545";
+
+    const preparedAction = await buildPreparedFixture(wallet, {
+      chainId: 1
+    });
+
+    await expect(runExecutePrepared({ preparedAction })).rejects.toMatchObject({
+      code: "PREPARED_CHAIN_MISMATCH"
+    });
+  });
+
   it("rejects execute when the prepared nonce is stale", async () => {
     const wallet = ethers.Wallet.createRandom();
 
@@ -216,6 +232,66 @@ describe("runExecutePrepared", () => {
 
     await expect(runExecutePrepared({ preparedAction })).rejects.toMatchObject({
       code: "EXECUTE_TRANSACTION_REVERTED"
+    });
+  });
+
+  it("surfaces submittedSoFar when a later transaction fails after earlier submissions", async () => {
+    const wallet = ethers.Wallet.createRandom();
+
+    process.env.AJNA_SKILLS_MODE = "execute";
+    process.env.AJNA_SIGNER_PRIVATE_KEY = wallet.privateKey;
+    process.env.AJNA_RPC_URL_BASE = "http://127.0.0.1:8545";
+
+    const preparedAction = await buildPreparedFixture(wallet, {
+      kind: "borrow",
+      startingNonce: 8,
+      transactions: [
+        {
+          label: "approval",
+          target: "0x0000000000000000000000000000000000000101",
+          value: "0",
+          data: "0xaaaa",
+          from: wallet.address
+        },
+        {
+          label: "action",
+          target: "0x0000000000000000000000000000000000000100",
+          value: "0",
+          data: "0xbbbb",
+          from: wallet.address
+        }
+      ]
+    });
+
+    mockBaseProvider({ nonce: 8 });
+    let estimateCalls = 0;
+    vi.spyOn(ethers.providers.JsonRpcProvider.prototype, "estimateGas").mockImplementation(async () => {
+      estimateCalls += 1;
+      if (estimateCalls === 2) {
+        throw new Error("pool no longer healthy");
+      }
+      return BigNumber.from(21_000);
+    });
+    vi.spyOn(ethers.Wallet.prototype, "sendTransaction").mockResolvedValue({
+      hash: `0x${"4".padStart(64, "0")}`,
+      wait: async () => ({
+        status: 1,
+        gasUsed: BigNumber.from(21_000)
+      })
+    } as never);
+
+    await expect(runExecutePrepared({ preparedAction })).rejects.toMatchObject({
+      code: "EXECUTE_VERIFICATION_FAILED",
+      details: {
+        submittedSoFar: [
+          {
+            label: "approval",
+            hash: `0x${"4".padStart(64, "0")}`,
+            status: 1,
+            gasUsed: "21000"
+          }
+        ]
+      }
     });
   });
 
